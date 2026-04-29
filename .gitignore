@@ -1,3 +1,9 @@
+# Metaphor harness generated experiment artifacts
+*.sqlite
+*.sqlite3
+runs*.db
+/reports/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
