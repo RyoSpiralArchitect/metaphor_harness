@@ -317,4 +317,3 @@ python3 -S -m unittest discover -s tests
 - mock judge は動作確認用です。本番結果として解釈しないでください。
 - 実運用では generator family と judge family を分け、複数 judge と human gold subset を使ってください。
 - `target_nonfact` 系は研究用の false-target 条件です。高リスク領域の false target は `--allow-risky-false-targets` を明示しない限り skip されます。
-- license はまだ設定していません。Repo 公開時に選んでください。
