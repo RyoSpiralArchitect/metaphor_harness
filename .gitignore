@@ -3,6 +3,8 @@
 *.sqlite3
 runs*.db
 /reports/
+config/providers.local.json
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

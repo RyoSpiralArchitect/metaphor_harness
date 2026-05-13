@@ -79,10 +79,14 @@ def cohens_kappa(a: dict[str, bool], b: dict[str, bool]) -> float | None:
     return (agree - expected) / (1 - expected)
 
 
-def build_run_level_rows(db: HarnessDB) -> list[dict[str, Any]]:
+def build_run_level_rows(
+    db: HarnessDB,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> list[dict[str, Any]]:
     generations = {r["run_id"]: dict(r) for r in db.fetch_generations()}
     audits_by_run_type: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    for audit in db.fetch_audits():
+    for audit in _latest_audits(db, judge_provider=judge_provider, judge_model=judge_model):
         parsed = _parse_json(audit["parsed_json"])
         parsed = apply_computed_pass_labels(parsed, audit["audit_type"])
         row = dict(audit)
@@ -121,6 +125,51 @@ def build_run_level_rows(db: HarnessDB) -> list[dict[str, Any]]:
             {"parse_error": bool(a["parsed"].get("parse_error"))} for a in r_audits
         ], "parse_error")
         rows.append(out)
+    return rows
+
+
+def _latest_audits(
+    db: HarnessDB,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> list[Any]:
+    latest: dict[tuple[str, str, str, str, int], Any] = {}
+    for audit in db.fetch_audits():
+        if judge_provider and audit["judge_provider"] != judge_provider:
+            continue
+        if judge_model and audit["judge_model"] != judge_model:
+            continue
+        key = (
+            audit["run_id"],
+            audit["audit_type"],
+            audit["judge_provider"],
+            audit["judge_model"],
+            audit["judge_index"],
+        )
+        current = latest.get(key)
+        if current is None or float(audit["created_at"]) >= float(current["created_at"]):
+            latest[key] = audit
+    return list(latest.values())
+
+
+def build_audit_parse_summary(
+    db: HarnessDB,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for audit in _latest_audits(db, judge_provider=judge_provider, judge_model=judge_model):
+        parsed = _parse_json(audit["parsed_json"])
+        groups[audit["audit_type"]].append(parsed)
+    rows = []
+    for audit_type, items in sorted(groups.items()):
+        parse_errors = sum(1 for item in items if item.get("parse_error"))
+        rows.append({
+            "audit_type": audit_type,
+            "n": len(items),
+            "parse_errors": parse_errors,
+            "parse_error_rate": parse_errors / len(items) if items else None,
+        })
     return rows
 
 
@@ -208,13 +257,17 @@ def build_control_delta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def build_judge_agreement(db: HarnessDB) -> list[dict[str, Any]]:
+def build_judge_agreement(
+    db: HarnessDB,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> list[dict[str, Any]]:
     label_sets = {
         "stance_leakage": ["pass_leakage", "pass_stance_pattern", "stance_pattern_match", "literal_vehicle_asserted", "stance_slip"],
         "relation": ["pass_relation", "surface_only_mapping"],
     }
     labels: dict[tuple[str, str, str], dict[str, bool]] = defaultdict(dict)
-    for audit in db.fetch_audits():
+    for audit in _latest_audits(db, judge_provider=judge_provider, judge_model=judge_model):
         parsed = _parse_json(audit["parsed_json"])
         parsed = apply_computed_pass_labels(parsed, audit["audit_type"])
         audit_type = audit["audit_type"]
@@ -335,12 +388,18 @@ def _markdown_table(rows: list[dict[str, Any]], columns: list[str], max_rows: in
     return "\n".join(lines) + "\n"
 
 
-def write_report(db_path: str, out_dir: str, human_labels_csv: str | None = None) -> None:
+def write_report(
+    db_path: str,
+    out_dir: str,
+    human_labels_csv: str | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
+) -> None:
     db = HarnessDB(db_path)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    run_rows = build_run_level_rows(db)
+    run_rows = build_run_level_rows(db, judge_provider=judge_provider, judge_model=judge_model)
     metaphor_rows = [r for r in run_rows if r.get("control_arm") != "literal_paraphrase"]
     literal_rows = [r for r in run_rows if r.get("control_arm") == "literal_paraphrase"]
 
@@ -352,10 +411,11 @@ def write_report(db_path: str, out_dir: str, human_labels_csv: str | None = None
     literal_summary = summarize(literal_rows, ["stance_pattern", "domain_distance", "provider", "model"])
     mapping_delta = build_mapping_visibility_delta(metaphor_rows)
     control_delta = build_control_delta(metaphor_rows)
-    agreement = build_judge_agreement(db)
+    agreement = build_judge_agreement(db, judge_provider=judge_provider, judge_model=judge_model)
     quality = build_quality_scores(db)
     eligible_quality = [r for r in quality if r.get("eligible_quality")]
     human_agreement = build_human_agreement(db, human_labels_csv) if human_labels_csv else []
+    audit_parse_summary = build_audit_parse_summary(db, judge_provider=judge_provider, judge_model=judge_model)
 
     _write_csv(out / "run_level.csv", run_rows)
     _write_csv(out / "summary_by_stance_pattern.csv", by_stance)
@@ -367,6 +427,7 @@ def write_report(db_path: str, out_dir: str, human_labels_csv: str | None = None
     _write_csv(out / "summary_mapping_visibility_delta.csv", mapping_delta)
     _write_csv(out / "summary_control_delta.csv", control_delta)
     _write_csv(out / "judge_agreement.csv", agreement)
+    _write_csv(out / "audit_parse_summary.csv", audit_parse_summary)
     _write_csv(out / "quality_scores.csv", quality)
     _write_csv(out / "quality_scores_eligible.csv", eligible_quality)
     if human_labels_csv:
@@ -379,6 +440,10 @@ def write_report(db_path: str, out_dir: str, human_labels_csv: str | None = None
     md.append(f"- metaphor generations in main metrics: {len(metaphor_rows)}\n")
     md.append(f"- literal paraphrase controls, reported separately: {len(literal_rows)}\n")
     md.append(f"- quality pair comparisons: {len(db.fetch_quality_pairs())}\n")
+    if judge_provider or judge_model:
+        md.append(f"- judge filter: provider={judge_provider or '*'}, model={judge_model or '*'}\n")
+    for row in audit_parse_summary:
+        md.append(f"- {row['audit_type']} parse errors: {row['parse_errors']} / {row['n']} ({_fmt_pct(row['parse_error_rate'])})\n")
     md.append("\nMain metaphor summaries exclude `literal_paraphrase`; literal controls are isolated below so vehicle/target stance metrics are not polluted by no-vehicle outputs.\n")
 
     md.append("\n## Main metaphor summary by stance pattern\n")

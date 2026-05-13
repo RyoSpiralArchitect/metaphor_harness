@@ -16,6 +16,43 @@ class ProviderError(RuntimeError):
     pass
 
 
+TOKEN_PARAMETER_NAMES = ("max_tokens", "max_completion_tokens")
+PROVIDER_PROFILE_NAMES = ("openai", "gemini", "mistral", "openai_compatible", "mock")
+
+_PROFILE_DEFAULTS: dict[str, dict[str, str | None]] = {
+    "openai": {
+        "type": "openai_compatible",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "token_parameter": "max_completion_tokens",
+    },
+    "gemini": {
+        "type": "openai_compatible",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "token_parameter": "max_tokens",
+    },
+    "mistral": {
+        "type": "openai_compatible",
+        "base_url": "https://api.mistral.ai/v1",
+        "api_key_env": "MISTRAL_API_KEY",
+        "token_parameter": "max_tokens",
+    },
+    "openai_compatible": {
+        "type": "openai_compatible",
+        "base_url": None,
+        "api_key_env": None,
+        "token_parameter": "max_tokens",
+    },
+    "mock": {
+        "type": "mock",
+        "base_url": None,
+        "api_key_env": None,
+        "token_parameter": "max_tokens",
+    },
+}
+
+
 class ProviderClient(Protocol):
     name: str
     model: str
@@ -35,20 +72,82 @@ class ProviderSpec:
     api_key: str | None = None
     timeout_s: float = 60.0
     max_tokens: int = 700
+    token_parameter: str = "max_tokens"
 
     @classmethod
     def from_dict(cls, obj: dict[str, Any]) -> "ProviderSpec":
+        base_url = obj.get("base_url")
+        model = str(obj.get("model", obj.get("name", "mock")))
+        token_parameter = str(
+            obj.get("token_parameter")
+            or _default_token_parameter(base_url=base_url, model=model)
+        )
+        _validate_token_parameter(token_parameter)
         return cls(
             name=str(obj["name"]),
             type=str(obj.get("type", "mock")),
-            model=str(obj.get("model", obj.get("name", "mock"))),
+            model=model,
             behavior=str(obj.get("behavior", "safe")),
-            base_url=obj.get("base_url"),
+            base_url=base_url,
             api_key_env=obj.get("api_key_env"),
             api_key=obj.get("api_key"),
             timeout_s=float(obj.get("timeout_s", 60.0)),
             max_tokens=int(obj.get("max_tokens", 700)),
+            token_parameter=token_parameter,
         )
+
+
+def _default_token_parameter(base_url: str | None, model: str) -> str:
+    del model
+    if base_url and "api.openai.com" in base_url:
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
+def _validate_token_parameter(value: str) -> None:
+    if value not in TOKEN_PARAMETER_NAMES:
+        names = ", ".join(TOKEN_PARAMETER_NAMES)
+        raise ProviderError(f"Unknown token parameter {value!r}; expected one of: {names}")
+
+
+def provider_spec_from_profile(
+    *,
+    name: str,
+    provider: str,
+    model: str,
+    base_url: str | None = None,
+    api_key_env: str | None = None,
+    timeout_s: float = 60.0,
+    max_tokens: int = 700,
+    token_parameter: str | None = None,
+    behavior: str = "safe",
+) -> ProviderSpec:
+    profile_name = provider.strip().lower()
+    if profile_name not in _PROFILE_DEFAULTS:
+        names = ", ".join(PROVIDER_PROFILE_NAMES)
+        raise ProviderError(f"Unknown provider profile {provider!r}; expected one of: {names}")
+
+    profile = _PROFILE_DEFAULTS[profile_name]
+    provider_type = str(profile["type"])
+    resolved_base_url = base_url or profile["base_url"]
+    resolved_api_key_env = api_key_env or profile["api_key_env"]
+    resolved_token_parameter = token_parameter or profile["token_parameter"] or "max_tokens"
+    _validate_token_parameter(resolved_token_parameter)
+
+    if provider_type == "openai_compatible" and not resolved_base_url:
+        raise ProviderError("openai_compatible profile requires --base-url")
+
+    return ProviderSpec(
+        name=name,
+        type=provider_type,
+        model=model,
+        behavior=behavior,
+        base_url=resolved_base_url,
+        api_key_env=resolved_api_key_env,
+        timeout_s=timeout_s,
+        max_tokens=max_tokens,
+        token_parameter=resolved_token_parameter,
+    )
 
 
 def load_provider_config(path: str) -> tuple[list[ProviderSpec], list[ProviderSpec]]:
@@ -69,6 +168,26 @@ def build_provider(spec: ProviderSpec) -> ProviderClient:
     if spec.type == "openai_compatible":
         return OpenAICompatibleProvider(spec)
     raise ProviderError(f"Unknown provider type: {spec.type}")
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif isinstance(item.get("content"), str):
+                    parts.append(str(item["content"]))
+        return "".join(parts)
+    if content is None:
+        return ""
+    return str(content)
 
 
 def _extract_case(messages: list[dict[str, str]]) -> dict[str, Any]:
@@ -288,10 +407,19 @@ class OpenAICompatibleProvider:
         self.name = spec.name
         self.model = spec.model
         self.base_url = spec.base_url.rstrip("/")
+        self.chat_completions_url = (
+            self.base_url
+            if self.base_url.endswith("/chat/completions")
+            else f"{self.base_url}/chat/completions"
+        )
         self.timeout_s = spec.timeout_s
         self.max_tokens = spec.max_tokens
+        _validate_token_parameter(spec.token_parameter)
+        self.token_parameter = spec.token_parameter
         self.api_key = spec.api_key or (os.environ.get(spec.api_key_env or "") if spec.api_key_env else None)
         if not self.api_key:
+            if spec.api_key_env:
+                raise ProviderError(f"Provider {spec.name} requires environment variable {spec.api_key_env}")
             raise ProviderError(f"Provider {spec.name} requires api_key or api_key_env")
 
     async def complete(self, messages: list[dict[str, str]], temperature: float) -> str:
@@ -302,11 +430,11 @@ class OpenAICompatibleProvider:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": self.max_tokens,
+            self.token_parameter: self.max_tokens,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url=f"{self.base_url}/chat/completions",
+            url=self.chat_completions_url,
             data=data,
             headers={
                 "Content-Type": "application/json",
@@ -323,6 +451,6 @@ class OpenAICompatibleProvider:
         except Exception as exc:
             raise ProviderError(f"Error from {self.name}: {exc}") from exc
         try:
-            return obj["choices"][0]["message"]["content"]
+            return _message_content_to_text(obj["choices"][0]["message"]["content"])
         except Exception as exc:
             raise ProviderError(f"Unexpected response shape from {self.name}: {obj}") from exc

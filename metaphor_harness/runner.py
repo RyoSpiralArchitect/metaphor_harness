@@ -22,7 +22,7 @@ from .prompts import (
     make_quality_pairwise_messages,
     make_relation_audit_messages,
 )
-from .providers import ProviderClient, build_provider, load_provider_config
+from .providers import ProviderClient, ProviderError, ProviderSpec, build_provider, load_provider_config
 from .schema import Case, case_content_hash, validate_control_arm, validate_mapping_visibility
 
 
@@ -87,12 +87,14 @@ async def complete_with_retry(
 @dataclass
 class RunOptions:
     cases_path: str
-    config_path: str
     db_path: str
     samples: int
     temperatures: list[float]
     control_arms: list[str]
     mapping_visibility: list[str]
+    config_path: str | None = None
+    generator_specs: list[ProviderSpec] | None = None
+    judge_specs: list[ProviderSpec] | None = None
     concurrency: int = 4
     retries: int = 2
     dry_run: bool = False
@@ -105,11 +107,27 @@ class HarnessRunner:
     def __init__(self, options: RunOptions):
         self.options = options
         self.db = HarnessDB(options.db_path)
-        gen_specs, judge_specs = load_provider_config(options.config_path)
+        if options.generator_specs is not None or options.judge_specs is not None:
+            if options.generator_specs is None or options.judge_specs is None:
+                raise ProviderError("RunOptions requires both generator_specs and judge_specs")
+            gen_specs = options.generator_specs
+            judge_specs = options.judge_specs
+            if not gen_specs:
+                raise ProviderError("RunOptions must include at least one generator")
+            if not judge_specs:
+                raise ProviderError("RunOptions must include at least one judge")
+        elif options.config_path:
+            gen_specs, judge_specs = load_provider_config(options.config_path)
+        else:
+            raise ProviderError("RunOptions requires either config_path or provider specs")
         self.generator_specs = gen_specs
         self.judge_specs = judge_specs
-        self.generators = [build_provider(s) for s in gen_specs]
-        self.judges = [build_provider(s) for s in judge_specs]
+        if options.dry_run:
+            self.generators = gen_specs
+            self.judges = judge_specs
+        else:
+            self.generators = [build_provider(s) for s in gen_specs]
+            self.judges = [build_provider(s) for s in judge_specs]
         self.sem = asyncio.Semaphore(max(1, options.concurrency))
 
     def close(self) -> None:

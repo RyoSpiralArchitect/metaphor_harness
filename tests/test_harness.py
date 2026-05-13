@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+from metaphor_harness.cli import main
 from metaphor_harness.db import HarnessDB
 from metaphor_harness.eval_rules import compute_pass_leakage, compute_pass_stance_pattern, compute_pass_relation, majority_bool
 from metaphor_harness.io_utils import load_cases_jsonl
 from metaphor_harness.prompts import make_generation_messages
+from metaphor_harness.providers import OpenAICompatibleProvider, ProviderSpec, provider_spec_from_profile
 from metaphor_harness.report import build_run_level_rows, write_report
 from metaphor_harness.runner import HarnessRunner, RunOptions
 from metaphor_harness.schema import case_content_hash
@@ -112,6 +117,88 @@ class HarnessTests(unittest.TestCase):
             self.assertIn("case_hash", first)
             self.assertIn("stance_pattern", first)
             self.assertIn("mapping_visibility", first)
+
+    def test_openai_profile_uses_max_completion_tokens(self) -> None:
+        spec = provider_spec_from_profile(
+            name="openai_generator",
+            provider="openai",
+            model="gpt-5.2",
+        )
+        self.assertEqual(spec.base_url, "https://api.openai.com/v1")
+        self.assertEqual(spec.api_key_env, "OPENAI_API_KEY")
+        self.assertEqual(spec.token_parameter, "max_completion_tokens")
+        judge_spec = provider_spec_from_profile(
+            name="gemini_judge",
+            provider="gemini",
+            model="gemini-3-flash-preview",
+        )
+        self.assertEqual(judge_spec.token_parameter, "max_tokens")
+        mistral_spec = provider_spec_from_profile(
+            name="mistral_judge",
+            provider="mistral",
+            model="mistral-large-latest",
+        )
+        self.assertEqual(mistral_spec.base_url, "https://api.mistral.ai/v1")
+        self.assertEqual(mistral_spec.api_key_env, "MISTRAL_API_KEY")
+        self.assertEqual(mistral_spec.token_parameter, "max_tokens")
+
+    def test_openai_compatible_payload_uses_configured_token_parameter(self) -> None:
+        spec = ProviderSpec(
+            name="provider",
+            type="openai_compatible",
+            model="gpt-5.2",
+            base_url="https://api.openai.com/v1",
+            api_key="test-key",
+            max_tokens=123,
+            token_parameter="max_completion_tokens",
+        )
+        provider = OpenAICompatibleProvider(spec)
+        captured_payload = {}
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return b'{"choices":[{"message":{"content":[{"type":"text","text":"ok"}]}}]}'
+
+        def fake_urlopen(req, timeout):
+            del timeout
+            captured_payload.update(json.loads(req.data.decode("utf-8")))
+            return FakeResponse()
+
+        with patch("metaphor_harness.providers.urllib.request.urlopen", fake_urlopen):
+            self.assertEqual(provider._complete_sync([{"role": "user", "content": "hi"}], 0.2), "ok")
+
+        self.assertEqual(captured_payload["max_completion_tokens"], 123)
+        self.assertNotIn("max_tokens", captured_payload)
+
+    def test_cli_profile_dry_run_without_config_or_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = main([
+                    "run",
+                    "--cases", str(ROOT / "data" / "seeds.jsonl"),
+                    "--model", "gpt-5.2",
+                    "--judge-provider", "gemini",
+                    "--judge-model", "gemini-3-flash-preview",
+                    "--db", str(Path(td) / "runs.sqlite"),
+                    "--samples", "1",
+                    "--temperatures", "0.2",
+                    "--arms", "metaphor_with_forbidden",
+                    "--mapping-visibility", "hidden",
+                    "--no-quality",
+                    "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        dry_run = json.loads(out.getvalue())
+        self.assertEqual(dry_run["generators"], ["openai_generator"])
+        self.assertEqual(dry_run["judges"], ["gemini_judge"])
+        self.assertEqual(dry_run["planned_new_generations"], 8)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@
       "base_url": "https://example-provider-a.invalid/v1",
       "api_key_env": "PROVIDER_A_API_KEY",
       "timeout_s": 60,
-      "max_tokens": 700
+      "max_tokens": 700,
+      "token_parameter": "max_tokens"
     },
     {
       "name": "provider_b_generator",
@@ -16,7 +17,8 @@
       "base_url": "https://example-provider-b.invalid/v1",
       "api_key_env": "PROVIDER_B_API_KEY",
       "timeout_s": 60,
-      "max_tokens": 700
+      "max_tokens": 700,
+      "token_parameter": "max_tokens"
     }
   ],
   "judges": [
@@ -27,7 +29,8 @@
       "base_url": "https://example-judge-1.invalid/v1",
       "api_key_env": "JUDGE_1_API_KEY",
       "timeout_s": 60,
-      "max_tokens": 900
+      "max_tokens": 900,
+      "token_parameter": "max_tokens"
     },
     {
       "name": "judge_family_2",
@@ -36,7 +39,8 @@
       "base_url": "https://example-judge-2.invalid/v1",
       "api_key_env": "JUDGE_2_API_KEY",
       "timeout_s": 60,
-      "max_tokens": 900
+      "max_tokens": 900,
+      "token_parameter": "max_tokens"
     },
     {
       "name": "judge_family_3",
@@ -45,7 +49,8 @@
       "base_url": "https://example-judge-3.invalid/v1",
       "api_key_env": "JUDGE_3_API_KEY",
       "timeout_s": 60,
-      "max_tokens": 900
+      "max_tokens": 900,
+      "token_parameter": "max_tokens"
     }
   ]
 }

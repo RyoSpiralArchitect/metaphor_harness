@@ -92,12 +92,67 @@ python3 -m metaphor_harness run \
   --quality-pairs-per-group 4
 ```
 
+実モデル pilot は JSON config なしでも回せます。`--provider` は省略時 `openai` です。
+組み込み profile は `openai`, `gemini`, `mistral`, `openai_compatible`, `mock` です。
+
+```bash
+export OPENAI_API_KEY=...
+export GEMINI_API_KEY=...
+export MISTRAL_API_KEY=...
+
+python3 -S -m metaphor_harness run \
+  --cases data/seeds.jsonl \
+  --model gpt-5.2 \
+  --judge-provider gemini \
+  --judge-model gemini-3-flash-preview \
+  --db runs.pilot.sqlite \
+  --samples 1 \
+  --temperatures 0.2 \
+  --arms metaphor_with_forbidden,metaphor_without_forbidden,stance_explicit_metaphor \
+  --mapping-visibility hidden,scaffolded \
+  --concurrency 4 \
+  --judge-max-output-tokens 2000 \
+  --no-quality
+```
+
+Gemini 側の project / key 権限で詰まる場合は、judge だけ Mistral に逃がせます。
+Mistral profile は `https://api.mistral.ai/v1/chat/completions` に `max_tokens` で投げます。
+
+```bash
+python3 -S -m metaphor_harness run \
+  --cases data/seeds.jsonl \
+  --model gpt-5.2 \
+  --judge-provider mistral \
+  --judge-model mistral-large-latest \
+  --api-key-env OPENAI_API_KEY \
+  --judge-api-key-env MISTRAL_API_KEY \
+  --db runs.pilot.sqlite \
+  --samples 1 \
+  --temperatures 0.2 \
+  --arms metaphor_with_forbidden,metaphor_without_forbidden,stance_explicit_metaphor \
+  --mapping-visibility hidden,scaffolded \
+  --concurrency 4 \
+  --judge-max-output-tokens 2000 \
+  --no-quality
+```
+
+複数 generator / judge を一度に比較したい場合は従来どおり `--config` を使います。OpenAI API へ直接投げる provider config では、必要に応じて `"token_parameter": "max_completion_tokens"` を指定できます。
+
 Report:
 
 ```bash
 python3 -m metaphor_harness report \
   --db runs.sqlite \
   --out reports
+```
+
+特定 judge だけで report を読みたい場合:
+
+```bash
+python3 -S -m metaphor_harness report \
+  --db runs.pilot.sqlite \
+  --out reports/pilot-mistral \
+  --judge-provider mistral_judge
 ```
 
 主要出力:

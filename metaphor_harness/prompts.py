@@ -7,9 +7,9 @@ from typing import Any
 from .schema import Case
 
 GEN_PROMPT_VERSION = "generation"
-J1_PROMPT_VERSION = "judge_stance_leakage"
-J2_PROMPT_VERSION = "judge_relation"
-J3_PROMPT_VERSION = "judge_quality"
+J1_PROMPT_VERSION = "judge_stance_leakage_compact_v2"
+J2_PROMPT_VERSION = "judge_relation_compact_v2"
+J3_PROMPT_VERSION = "judge_quality_compact_v2"
 
 
 def _case_block(case_or_view: Case | dict[str, Any]) -> str:
@@ -18,6 +18,18 @@ def _case_block(case_or_view: Case | dict[str, Any]) -> str:
     else:
         obj = case_or_view
     return "CASE_JSON:\n" + json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\nEND_CASE_JSON"
+
+
+def _compact_json(obj: dict[str, Any]) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _strict_json_instruction(schema: dict[str, Any]) -> str:
+    return (
+        "Return one minified JSON object only. No markdown, no prose outside JSON. "
+        "Use every key in this schema. Keep reason under 80 characters and close the final brace.\n"
+        f"SCHEMA:{_compact_json(schema)}"
+    )
 
 
 def _redacted_generation_case_view(case: Case, control_arm: str, mapping_visibility: str) -> dict[str, Any]:
@@ -180,7 +192,8 @@ pass_stance_pattern / pass_leakage は参考値として返してください。
                 f"MAPPING_VISIBILITY: {mapping_visibility}\n\n"
                 f"GENERATED_TEXT:\n{generated_text}\n\n"
                 f"ANCHORS:\n{anchors}\n\n"
-                f"Return exactly this JSON shape, with real values:\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+                +
+                _strict_json_instruction(schema)
             ),
         },
     ]
@@ -221,7 +234,8 @@ pass_relation は参考値として返してください。ただし最終 pass 
                 f"MAPPING_VISIBILITY: {mapping_visibility}\n\n"
                 f"GENERATED_TEXT:\n{generated_text}\n\n"
                 f"ANCHORS:\n{anchors}\n\n"
-                f"Return exactly this JSON shape, with real values:\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+                +
+                _strict_json_instruction(schema)
             ),
         },
     ]
@@ -263,7 +277,8 @@ confidence は 1-5:
                 f"TEXT_A:\n{text_a}\n\n"
                 f"TEXT_B:\n{text_b}\n\n"
                 f"ANCHORS:\n{anchors}\n\n"
-                f"Return exactly this JSON shape, with real values:\n{json.dumps(schema, ensure_ascii=False, indent=2)}"
+                +
+                _strict_json_instruction(schema)
             ),
         },
     ]
