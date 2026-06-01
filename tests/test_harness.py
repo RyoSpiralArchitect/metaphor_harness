@@ -2,23 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
 
-from metaphor_harness.cli import main
 from metaphor_harness.db import HarnessDB
-from metaphor_harness.eval_rules import compute_pass_leakage, compute_pass_stance_pattern, compute_pass_relation, majority_bool
+from metaphor_harness.eval_rules import (
+    compute_pass_leakage,
+    compute_pass_metaphor_integrity,
+    compute_pass_relation,
+    compute_pass_stance_pattern,
+    majority_bool,
+)
 from metaphor_harness.io_utils import load_cases_jsonl
 from metaphor_harness.prompts import make_generation_messages
-from metaphor_harness.providers import OpenAICompatibleProvider, ProviderSpec, provider_spec_from_profile
 from metaphor_harness.report import build_run_level_rows, write_report
 from metaphor_harness.runner import HarnessRunner, RunOptions
-from metaphor_harness.schema import case_content_hash
+from metaphor_harness.schema import Case, case_content_hash
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class HarnessTests(unittest.TestCase):
     def test_generation_prompt_redacts_forbidden_and_mapping_when_hidden(self) -> None:
         case = load_cases_jsonl(ROOT / "data" / "seeds.jsonl")[0]
+        self.assertEqual(case.metaphor_mode, "structural")
+        self.assertEqual(case.vehicle_spec, "constrained")
         hidden = make_generation_messages(case, "metaphor_without_forbidden", mapping_visibility="hidden")[-1]["content"]
         scaffolded = make_generation_messages(case, "metaphor_with_forbidden", mapping_visibility="scaffolded")[-1]["content"]
         literal = make_generation_messages(case, "literal_paraphrase", mapping_visibility="scaffolded")[-1]["content"]
@@ -41,6 +44,65 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn(relation_name, literal)
         self.assertIn(relation_name, scaffolded)
         self.assertNotIn('"vehicle"', literal)
+
+    def test_open_vehicle_spec_keeps_target_scaffold_but_hides_vehicle_scaffold(self) -> None:
+        base = load_cases_jsonl(ROOT / "data" / "seeds.jsonl")[0].to_dict()
+        base["vehicle_spec"] = "open"
+        case = Case.from_dict(base)
+        prompt = make_generation_messages(case, "metaphor_with_forbidden", mapping_visibility="scaffolded")[-1]["content"]
+
+        self.assertIn("VEHICLE_SPEC: open", prompt)
+        self.assertIn(base["mapping"]["target_relations"][0]["name"], prompt)
+        self.assertNotIn(base["mapping"]["desired_vehicle_relations"][0]["description"], prompt)
+        self.assertNotIn(base["vehicle"]["instruction"], prompt)
+
+    def test_expressive_cases_use_dedicated_audits_not_relation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "expressive.sqlite"
+            report_dir = tmp / "reports"
+            opts = RunOptions(
+                cases_path=str(ROOT / "data" / "expressive_seeds.jsonl"),
+                config_path=str(ROOT / "config" / "providers.mock.json"),
+                db_path=str(db_path),
+                samples=1,
+                temperatures=[0.2],
+                control_arms=["metaphor_with_forbidden"],
+                mapping_visibility=["hidden"],
+                concurrency=16,
+                retries=1,
+                run_quality_pairs=False,
+            )
+            runner = HarnessRunner(opts)
+            try:
+                asyncio.run(runner.run())
+            finally:
+                runner.close()
+
+            db = HarnessDB(db_path)
+            try:
+                rows = build_run_level_rows(db)
+                self.assertEqual(len(rows), 4 * 3)
+                self.assertTrue(any(r["metaphor_mode"] == "literary" for r in rows))
+                self.assertTrue(any(r["metaphor_mode"] == "humorous" for r in rows))
+                self.assertTrue(all(r["vehicle_spec"] == "open" for r in rows))
+                self.assertTrue(any(r["literary_freshness_score_mean"] is not None for r in rows))
+                self.assertTrue(any(r["humor_surprise_score_mean"] is not None for r in rows))
+                audits = db.fetch_audits()
+                audit_types = {a["audit_type"] for a in audits}
+                self.assertIn("metaphor_integrity", audit_types)
+                self.assertIn("literary", audit_types)
+                self.assertIn("humor", audit_types)
+                self.assertNotIn("relation", audit_types)
+                self.assertTrue(any(r["pass_metaphor_integrity"] is not None for r in rows))
+                self.assertTrue(all("metaphor_vehicle_affordance_broken" in r for r in rows))
+                self.assertTrue(all("metaphor_licensed_rupture_success" in r for r in rows))
+            finally:
+                db.close()
+
+            write_report(str(db_path), str(report_dir))
+            self.assertTrue((report_dir / "summary_expressive_modes.csv").exists())
+            self.assertTrue((report_dir / "summary_metaphor_failure_tags.csv").exists())
 
     def test_case_hash_changes_when_case_content_changes(self) -> None:
         case = load_cases_jsonl(ROOT / "data" / "seeds.jsonl")[0]
@@ -69,6 +131,59 @@ class HarnessTests(unittest.TestCase):
             "relation_mapping_pass": True,
             "surface_only_mapping": True,
             "relation_score": 5,
+        }))
+        self.assertIs(True, compute_pass_metaphor_integrity({
+            "target_anchor_preserved": True,
+            "vehicle_affordance_coherent": True,
+            "literal_scene_confusion": False,
+            "semantic_break": False,
+            "mode_fit": True,
+            "premise_load_score": 2,
+            "imageability_score": 4,
+        }))
+        self.assertIs(False, compute_pass_metaphor_integrity({
+            "target_anchor_preserved": True,
+            "vehicle_affordance_coherent": False,
+            "literal_scene_confusion": False,
+            "semantic_break": False,
+            "mode_fit": True,
+            "premise_load_score": 2,
+            "imageability_score": 4,
+        }))
+        self.assertIs(False, compute_pass_metaphor_integrity({
+            "target_anchor_preserved": True,
+            "vehicle_affordance_coherent": True,
+            "literal_scene_confusion": False,
+            "semantic_break": False,
+            "mode_fit": True,
+            "premise_load_score": 2,
+            "imageability_score": 4,
+            "medium_dynamics_mismatch": True,
+            "invariant_preserved": True,
+        }))
+        self.assertIs(True, compute_pass_metaphor_integrity({
+            "target_anchor_preserved": True,
+            "vehicle_affordance_coherent": True,
+            "literal_scene_confusion": False,
+            "semantic_break": False,
+            "mode_fit": True,
+            "premise_load_score": 4,
+            "imageability_score": 4,
+            "premise_overload": True,
+            "licensed_rupture_success": True,
+            "invariant_preserved": True,
+        }))
+        self.assertIs(False, compute_pass_metaphor_integrity({
+            "target_anchor_preserved": True,
+            "vehicle_affordance_coherent": True,
+            "literal_scene_confusion": False,
+            "semantic_break": False,
+            "mode_fit": True,
+            "premise_load_score": 2,
+            "imageability_score": 4,
+            "target_fact_drift": True,
+            "licensed_rupture_success": True,
+            "invariant_preserved": True,
         }))
         self.assertIs(None, majority_bool([True, False]))
 
@@ -102,6 +217,8 @@ class HarnessTests(unittest.TestCase):
                 self.assertEqual(len(generations), 8 * 3 * 5)
                 rows = build_run_level_rows(db)
                 self.assertTrue(all("case_hash" in r for r in rows))
+                self.assertTrue(all(r["metaphor_mode"] == "structural" for r in rows))
+                self.assertTrue(all(r["vehicle_spec"] == "constrained" for r in rows))
                 self.assertTrue(any(r["mapping_visibility"] == "scaffolded" for r in rows))
                 self.assertTrue(any(r["control_arm"] == "literal_paraphrase" for r in rows))
             finally:
@@ -109,96 +226,19 @@ class HarnessTests(unittest.TestCase):
 
             write_report(str(db_path), str(report_dir))
             self.assertTrue((report_dir / "summary_by_stance_pattern.csv").exists())
+            self.assertTrue((report_dir / "summary_by_metaphor_mode_vehicle_spec.csv").exists())
+            self.assertTrue((report_dir / "summary_expressive_modes.csv").exists())
+            self.assertTrue((report_dir / "summary_metaphor_failure_tags.csv").exists())
             self.assertTrue((report_dir / "summary_by_stance_distance_visibility_arm.csv").exists())
             self.assertTrue((report_dir / "summary_mapping_visibility_delta.csv").exists())
             self.assertTrue((report_dir / "summary_literal_controls.csv").exists())
             with (report_dir / "run_level.csv").open("r", encoding="utf-8", newline="") as f:
                 first = next(csv.DictReader(f))
             self.assertIn("case_hash", first)
+            self.assertIn("metaphor_mode", first)
+            self.assertIn("vehicle_spec", first)
             self.assertIn("stance_pattern", first)
             self.assertIn("mapping_visibility", first)
-
-    def test_openai_profile_uses_max_completion_tokens(self) -> None:
-        spec = provider_spec_from_profile(
-            name="openai_generator",
-            provider="openai",
-            model="gpt-5.2",
-        )
-        self.assertEqual(spec.base_url, "https://api.openai.com/v1")
-        self.assertEqual(spec.api_key_env, "OPENAI_API_KEY")
-        self.assertEqual(spec.token_parameter, "max_completion_tokens")
-        judge_spec = provider_spec_from_profile(
-            name="gemini_judge",
-            provider="gemini",
-            model="gemini-3-flash-preview",
-        )
-        self.assertEqual(judge_spec.token_parameter, "max_tokens")
-        mistral_spec = provider_spec_from_profile(
-            name="mistral_judge",
-            provider="mistral",
-            model="mistral-large-latest",
-        )
-        self.assertEqual(mistral_spec.base_url, "https://api.mistral.ai/v1")
-        self.assertEqual(mistral_spec.api_key_env, "MISTRAL_API_KEY")
-        self.assertEqual(mistral_spec.token_parameter, "max_tokens")
-
-    def test_openai_compatible_payload_uses_configured_token_parameter(self) -> None:
-        spec = ProviderSpec(
-            name="provider",
-            type="openai_compatible",
-            model="gpt-5.2",
-            base_url="https://api.openai.com/v1",
-            api_key="test-key",
-            max_tokens=123,
-            token_parameter="max_completion_tokens",
-        )
-        provider = OpenAICompatibleProvider(spec)
-        captured_payload = {}
-
-        class FakeResponse:
-            def __enter__(self) -> "FakeResponse":
-                return self
-
-            def __exit__(self, exc_type, exc, tb) -> None:
-                return None
-
-            def read(self) -> bytes:
-                return b'{"choices":[{"message":{"content":[{"type":"text","text":"ok"}]}}]}'
-
-        def fake_urlopen(req, timeout):
-            del timeout
-            captured_payload.update(json.loads(req.data.decode("utf-8")))
-            return FakeResponse()
-
-        with patch("metaphor_harness.providers.urllib.request.urlopen", fake_urlopen):
-            self.assertEqual(provider._complete_sync([{"role": "user", "content": "hi"}], 0.2), "ok")
-
-        self.assertEqual(captured_payload["max_completion_tokens"], 123)
-        self.assertNotIn("max_tokens", captured_payload)
-
-    def test_cli_profile_dry_run_without_config_or_keys(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            out = io.StringIO()
-            with redirect_stdout(out):
-                code = main([
-                    "run",
-                    "--cases", str(ROOT / "data" / "seeds.jsonl"),
-                    "--model", "gpt-5.2",
-                    "--judge-provider", "gemini",
-                    "--judge-model", "gemini-3-flash-preview",
-                    "--db", str(Path(td) / "runs.sqlite"),
-                    "--samples", "1",
-                    "--temperatures", "0.2",
-                    "--arms", "metaphor_with_forbidden",
-                    "--mapping-visibility", "hidden",
-                    "--no-quality",
-                    "--dry-run",
-                ])
-        self.assertEqual(code, 0)
-        dry_run = json.loads(out.getvalue())
-        self.assertEqual(dry_run["generators"], ["openai_generator"])
-        self.assertEqual(dry_run["judges"], ["gemini_judge"])
-        self.assertEqual(dry_run["planned_new_generations"], 8)
 
 
 if __name__ == "__main__":

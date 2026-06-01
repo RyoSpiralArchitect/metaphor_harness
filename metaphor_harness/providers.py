@@ -226,6 +226,12 @@ def _extract_control_arm(messages: list[dict[str, str]]) -> str:
     return m.group(1).strip() if m else "metaphor_with_forbidden"
 
 
+def _extract_metaphor_mode(messages: list[dict[str, str]]) -> str:
+    text = "\n".join(m.get("content", "") for m in messages)
+    m = re.search(r"METAPHOR_MODE:\s*([^\n]+)", text)
+    return m.group(1).strip() if m else "structural"
+
+
 def _extract_sample_index(messages: list[dict[str, str]]) -> int:
     text = "\n".join(m.get("content", "") for m in messages)
     m = re.search(r"SAMPLE_INDEX:\s*(\d+)", text)
@@ -250,6 +256,12 @@ class MockProvider:
             return self._mock_j1(messages)
         if "J2:" in system:
             return self._mock_j2(messages)
+        if "J_LIT:" in system:
+            return self._mock_j_lit(messages)
+        if "J_HUMOR:" in system:
+            return self._mock_j_humor(messages)
+        if "J_META:" in system:
+            return self._mock_j_meta(messages)
         if "J3:" in system:
             return self._mock_j3(messages)
         return self._mock_generation(messages, temperature)
@@ -257,6 +269,7 @@ class MockProvider:
     def _mock_generation(self, messages: list[dict[str, str]], temperature: float) -> str:
         case = _extract_case(messages)
         control_arm = _extract_control_arm(messages)
+        metaphor_mode = _extract_metaphor_mode(messages)
         sample_index = _extract_sample_index(messages)
         target = case.get("target", {})
         vehicle = case.get("vehicle", {})
@@ -272,6 +285,11 @@ class MockProvider:
 
         if control_arm == "literal_paraphrase":
             return f"{claim}"
+
+        if metaphor_mode == "literary":
+            return f"{claim}は、濡れた硝子の内側で小さな灯りが息をひそめるように近づく。"
+        if metaphor_mode == "humorous":
+            return f"{claim}は、会議室に迷い込んだGPSが自信満々に海へ案内するようなものだ。"
 
         # Deterministic variation from sample index and provider behavior.
         rng = random.Random(f"{self.name}|{self.behavior}|{case.get('case_id')}|{control_arm}|{sample_index}|{temperature}")
@@ -366,6 +384,98 @@ class MockProvider:
             "reason": "mock判定: 関係マーカーと表面語逃げを簡易検査した。",
         })
 
+    def _mock_j_meta(self, messages: list[dict[str, str]]) -> str:
+        case = _extract_case(messages)
+        generated = _extract_generated_text(messages)
+        metaphor_mode = _extract_metaphor_mode(messages)
+        claim = case.get("target", {}).get("claim", "")
+
+        target_anchor = bool(claim and claim in generated)
+        semantic_break = any(x in generated for x in ["明日の朝の余韻", "時間のない宇宙船"])
+        literal_scene = any(x in generated for x in ["物理的に働いている", "実際に液体", "本当に超自然"])
+        weak_affordance = any(x in generated for x in ["地図が迷子", "地図のように、何度も方向を変え"])
+        medium_dynamics_mismatch = any(x in generated for x in ["霧の波", "海の底", "水面", "岸を", "岸辺"])
+        temporal_anchor_broken = any(x in generated for x in ["明日の朝の余韻", "未来の余韻", "まだ来ていない余韻"])
+        premise_load = 4 if any(x in generated for x in ["無限", "時空", "宇宙船"]) else 2
+        mode_fit = True
+        if metaphor_mode == "humorous":
+            mode_fit = any(x in generated for x in ["GPS", "自信満々", "会議", "迷子", "海"])
+        elif metaphor_mode == "literary":
+            mode_fit = not any(x in generated for x in ["GPS", "笑える", "冗談"])
+        imageability = 2 if weak_affordance or semantic_break or medium_dynamics_mismatch else 4
+        premise_overload = premise_load >= 4
+        target_fact_drift = not target_anchor
+        tone_contract_slip = not mode_fit
+        metaphor_literal_ambiguity = literal_scene
+        licensed_rupture = (
+            metaphor_mode == "humorous"
+            and target_anchor
+            and mode_fit
+            and any(x in generated for x in ["無限のサイコロ", "ナンセンス", "わざと"])
+        )
+        invariant_preserved = (
+            target_anchor
+            and not weak_affordance
+            and not semantic_break
+            and not temporal_anchor_broken
+        )
+
+        tags = []
+        if target_fact_drift:
+            tags.append("target_fact_drift")
+        if weak_affordance:
+            tags.append("vehicle_affordance_broken")
+        if medium_dynamics_mismatch:
+            tags.append("medium_dynamics_mismatch")
+        if temporal_anchor_broken:
+            tags.append("temporal_anchor_broken")
+        if literal_scene:
+            tags.append("metaphor_literal_ambiguity")
+        if premise_overload:
+            tags.append("premise_overload")
+        if semantic_break:
+            tags.append("semantic_break")
+        if tone_contract_slip:
+            tags.append("tone_contract_slip")
+        if imageability <= 2:
+            tags.append("imageability_failure")
+        if licensed_rupture:
+            tags.append("licensed_rupture_success")
+
+        passed = (
+            target_anchor
+            and not weak_affordance
+            and not medium_dynamics_mismatch
+            and not temporal_anchor_broken
+            and not literal_scene
+            and not semantic_break
+            and mode_fit
+            and (premise_load <= 3 or licensed_rupture)
+            and imageability >= 3
+            and invariant_preserved
+        )
+        return _json({
+            "target_anchor_preserved": target_anchor,
+            "vehicle_affordance_coherent": not weak_affordance,
+            "literal_scene_confusion": literal_scene,
+            "premise_load_score": premise_load,
+            "semantic_break": semantic_break,
+            "mode_fit": mode_fit,
+            "imageability_score": imageability,
+            "target_fact_drift": target_fact_drift,
+            "vehicle_affordance_broken": weak_affordance,
+            "medium_dynamics_mismatch": medium_dynamics_mismatch,
+            "temporal_anchor_broken": temporal_anchor_broken,
+            "premise_overload": premise_overload,
+            "tone_contract_slip": tone_contract_slip,
+            "metaphor_literal_ambiguity": metaphor_literal_ambiguity,
+            "licensed_rupture_success": licensed_rupture,
+            "invariant_preserved": invariant_preserved,
+            "failure_tags": tags,
+            "pass_metaphor_integrity": passed,
+            "reason": "mock判定: target保持、前提負荷、写像の足場を簡易検査した。",
+        })
+
     def _mock_j3(self, messages: list[dict[str, str]]) -> str:
         a, b = _extract_pair_texts(messages)
 
@@ -391,6 +501,47 @@ class MockProvider:
                 "B": {"compression": 3, "freshness": max(1, min(5, sb + 2)), "clarity": 3, "rhythm": 3},
             },
             "reason": "mock判定: 簡易スコアによる比較。",
+        })
+
+    def _mock_j_lit(self, messages: list[dict[str, str]]) -> str:
+        generated = _extract_generated_text(messages)
+        over_explanation = any(x in generated for x in ["つまり", "これは", "意味する"])
+        cliche = 5 if any(x in generated for x in ["夢のよう", "人生は旅", "光と闇"]) else 1
+        freshness = 2 if cliche >= 4 else 4
+        tonal_fit = 3 if "ように" in generated else 4
+        affect = 4 if any(x in generated for x in ["ひそめる", "濡れた", "灯り", "沈む"]) else 3
+        compression = 4 if len(generated) <= 80 else 3
+        passed = freshness >= 3 and affect >= 3 and cliche <= 3 and not over_explanation
+        return _json({
+            "freshness_score": freshness,
+            "tonal_fit_score": tonal_fit,
+            "affect_transfer_score": affect,
+            "poetic_compression_score": compression,
+            "cliche_risk": cliche,
+            "over_explanation": over_explanation,
+            "register_mismatch": False,
+            "pass_literary_quality": passed,
+            "reason": "mock判定: 陳腐語と説明化を簡易検査した。",
+        })
+
+    def _mock_j_humor(self, messages: list[dict[str, str]]) -> str:
+        generated = _extract_generated_text(messages)
+        over_explanation = any(x in generated for x in ["なぜなら", "という冗談", "笑える"])
+        flattening = over_explanation or not any(x in generated for x in ["GPS", "自信満々", "海", "会議室"])
+        incongruity = not flattening
+        surprise = 4 if incongruity else 2
+        timing = 4 if "ようなものだ" in generated or "ように" in generated else 3
+        passed = incongruity and not over_explanation
+        return _json({
+            "incongruity_success": incongruity,
+            "surprise_score": surprise,
+            "tonal_fit_score": 4,
+            "comic_timing_score": timing,
+            "humor_flattening": flattening,
+            "over_explanation": over_explanation,
+            "mean_spiritedness_risk": 1,
+            "pass_humor_quality": passed,
+            "reason": "mock判定: 不整合と説明化を簡易検査した。",
         })
 
 

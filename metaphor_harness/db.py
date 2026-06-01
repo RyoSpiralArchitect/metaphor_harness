@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS cases (
     case_hash TEXT PRIMARY KEY,
     case_id TEXT NOT NULL,
     stance_pattern TEXT NOT NULL,
+    metaphor_mode TEXT NOT NULL,
+    vehicle_spec TEXT NOT NULL,
     domain_distance TEXT NOT NULL,
     risk_domain TEXT NOT NULL,
     case_json TEXT NOT NULL,
@@ -23,6 +25,8 @@ CREATE TABLE IF NOT EXISTS generations (
     case_id TEXT NOT NULL,
     case_hash TEXT NOT NULL,
     stance_pattern TEXT NOT NULL,
+    metaphor_mode TEXT NOT NULL,
+    vehicle_spec TEXT NOT NULL,
     domain_distance TEXT NOT NULL,
     mapping_visibility TEXT NOT NULL,
     control_arm TEXT NOT NULL,
@@ -54,6 +58,8 @@ CREATE TABLE IF NOT EXISTS quality_pairs (
     pair_id TEXT PRIMARY KEY,
     case_id TEXT NOT NULL,
     case_hash TEXT NOT NULL,
+    metaphor_mode TEXT NOT NULL,
+    vehicle_spec TEXT NOT NULL,
     mapping_visibility TEXT NOT NULL,
     control_arm TEXT NOT NULL,
     text_a_run_id TEXT NOT NULL,
@@ -81,19 +87,33 @@ class HarnessDB:
         self.conn.commit()
 
     def _ensure_current_columns(self) -> None:
-        """Best-effort migration for older DBs that predate case_hash/mapping_visibility."""
+        """Best-effort migration for older DBs that predate current metadata columns."""
         def columns(table: str) -> set[str]:
             return {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
 
         gen_cols = columns("generations")
         if "case_hash" not in gen_cols:
             self.conn.execute("ALTER TABLE generations ADD COLUMN case_hash TEXT NOT NULL DEFAULT 'legacy_case_hash'")
+        if "metaphor_mode" not in gen_cols:
+            self.conn.execute("ALTER TABLE generations ADD COLUMN metaphor_mode TEXT NOT NULL DEFAULT 'structural'")
+        if "vehicle_spec" not in gen_cols:
+            self.conn.execute("ALTER TABLE generations ADD COLUMN vehicle_spec TEXT NOT NULL DEFAULT 'constrained'")
         if "mapping_visibility" not in gen_cols:
             self.conn.execute("ALTER TABLE generations ADD COLUMN mapping_visibility TEXT NOT NULL DEFAULT 'legacy'")
+
+        case_cols = columns("cases")
+        if "metaphor_mode" not in case_cols:
+            self.conn.execute("ALTER TABLE cases ADD COLUMN metaphor_mode TEXT NOT NULL DEFAULT 'structural'")
+        if "vehicle_spec" not in case_cols:
+            self.conn.execute("ALTER TABLE cases ADD COLUMN vehicle_spec TEXT NOT NULL DEFAULT 'constrained'")
 
         qp_cols = columns("quality_pairs")
         if "case_hash" not in qp_cols:
             self.conn.execute("ALTER TABLE quality_pairs ADD COLUMN case_hash TEXT NOT NULL DEFAULT 'legacy_case_hash'")
+        if "metaphor_mode" not in qp_cols:
+            self.conn.execute("ALTER TABLE quality_pairs ADD COLUMN metaphor_mode TEXT NOT NULL DEFAULT 'structural'")
+        if "vehicle_spec" not in qp_cols:
+            self.conn.execute("ALTER TABLE quality_pairs ADD COLUMN vehicle_spec TEXT NOT NULL DEFAULT 'constrained'")
         if "mapping_visibility" not in qp_cols:
             self.conn.execute("ALTER TABLE quality_pairs ADD COLUMN mapping_visibility TEXT NOT NULL DEFAULT 'legacy'")
 
@@ -104,11 +124,13 @@ class HarnessDB:
         mapping = case_dict.get("mapping", {})
         self.conn.execute(
             """
-            INSERT INTO cases(case_hash, case_id, stance_pattern, domain_distance, risk_domain, case_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cases(case_hash, case_id, stance_pattern, metaphor_mode, vehicle_spec, domain_distance, risk_domain, case_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(case_hash) DO UPDATE SET
               case_id=excluded.case_id,
               stance_pattern=excluded.stance_pattern,
+              metaphor_mode=excluded.metaphor_mode,
+              vehicle_spec=excluded.vehicle_spec,
               domain_distance=excluded.domain_distance,
               risk_domain=excluded.risk_domain,
               case_json=excluded.case_json,
@@ -118,6 +140,8 @@ class HarnessDB:
                 case_hash,
                 case_dict["case_id"],
                 case_dict["stance_pattern"],
+                case_dict.get("metaphor_mode", "structural"),
+                case_dict.get("vehicle_spec", "constrained"),
                 mapping.get("domain_distance", "near"),
                 case_dict.get("risk_domain", "benign"),
                 json.dumps(case_dict, ensure_ascii=False, sort_keys=True),
@@ -134,13 +158,14 @@ class HarnessDB:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO generations(
-                run_id, case_id, case_hash, stance_pattern, domain_distance, mapping_visibility, control_arm,
+                run_id, case_id, case_hash, stance_pattern, metaphor_mode, vehicle_spec, domain_distance, mapping_visibility, control_arm,
                 provider, model, temperature, sample_index, prompt_version,
                 generated_text, raw_response, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["run_id"], row["case_id"], row["case_hash"], row["stance_pattern"], row["domain_distance"],
+                row["run_id"], row["case_id"], row["case_hash"], row["stance_pattern"],
+                row.get("metaphor_mode", "structural"), row.get("vehicle_spec", "constrained"), row["domain_distance"],
                 row["mapping_visibility"], row["control_arm"], row["provider"], row["model"], row["temperature"],
                 row["sample_index"], row["prompt_version"], row["generated_text"], row["raw_response"],
                 row.get("created_at", time.time()),
@@ -176,13 +201,15 @@ class HarnessDB:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO quality_pairs(
-                pair_id, case_id, case_hash, mapping_visibility, control_arm, text_a_run_id, text_b_run_id,
+                pair_id, case_id, case_hash, metaphor_mode, vehicle_spec, mapping_visibility, control_arm, text_a_run_id, text_b_run_id,
                 judge_provider, judge_model, judge_index, prompt_version,
                 raw_response, parsed_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                row["pair_id"], row["case_id"], row["case_hash"], row["mapping_visibility"], row["control_arm"],
+                row["pair_id"], row["case_id"], row["case_hash"],
+                row.get("metaphor_mode", "structural"), row.get("vehicle_spec", "constrained"),
+                row["mapping_visibility"], row["control_arm"],
                 row["text_a_run_id"], row["text_b_run_id"], row["judge_provider"], row["judge_model"],
                 row["judge_index"], row["prompt_version"], row["raw_response"],
                 json.dumps(row["parsed_json"], ensure_ascii=False, sort_keys=True), row.get("created_at", time.time()),
@@ -194,7 +221,7 @@ class HarnessDB:
         return list(self.conn.execute(
             """
             SELECT * FROM generations
-            ORDER BY case_id, case_hash, mapping_visibility, control_arm, provider, temperature, sample_index
+            ORDER BY metaphor_mode, vehicle_spec, case_id, case_hash, mapping_visibility, control_arm, provider, temperature, sample_index
             """
         ))
 
