@@ -20,6 +20,8 @@ VALID_CONTROL_ARMS = {
     "stance_explicit_metaphor",
 }
 VALID_MAPPING_VISIBILITY = {"hidden", "scaffolded"}
+VALID_METAPHOR_MODES = {"structural", "literary", "humorous"}
+VALID_VEHICLE_SPEC = {"constrained", "open"}
 
 
 class SchemaError(ValueError):
@@ -138,9 +140,12 @@ class MappingSpec:
 class Case:
     case_id: str
     stance_pattern: str
+    metaphor_mode: str
+    vehicle_spec: str
     target: TargetSpec
     vehicle: VehicleSpec
     mapping: MappingSpec
+    expressive: Dict[str, Any] = field(default_factory=dict)
     forbidden_implications: List[str] = field(default_factory=list)
     risk_domain: str = "benign"
     notes: str = ""
@@ -149,6 +154,12 @@ class Case:
     def from_dict(cls, obj: Dict[str, Any]) -> "Case":
         target = TargetSpec.from_dict(_require(obj, "target"))
         vehicle = VehicleSpec.from_dict(_require(obj, "vehicle"))
+        metaphor_mode = str(obj.get("metaphor_mode", "structural"))
+        if metaphor_mode not in VALID_METAPHOR_MODES:
+            raise SchemaError(f"metaphor_mode must be one of {sorted(VALID_METAPHOR_MODES)}")
+        vehicle_spec = str(obj.get("vehicle_spec", "constrained"))
+        if vehicle_spec not in VALID_VEHICLE_SPEC:
+            raise SchemaError(f"vehicle_spec must be one of {sorted(VALID_VEHICLE_SPEC)}")
         stance_pattern = str(_require(obj, "stance_pattern"))
         if stance_pattern not in VALID_STANCE_PATTERNS:
             raise SchemaError(f"stance_pattern must be one of {sorted(VALID_STANCE_PATTERNS)}")
@@ -157,12 +168,18 @@ class Case:
             raise SchemaError(
                 f"stance_pattern={stance_pattern} disagrees with vehicle/target truth fields; inferred={inferred}"
             )
+        expressive = obj.get("expressive", {})
+        if not isinstance(expressive, dict):
+            raise SchemaError("expressive must be a dict when provided")
         return cls(
             case_id=str(_require(obj, "case_id")),
             stance_pattern=stance_pattern,
+            metaphor_mode=metaphor_mode,
+            vehicle_spec=vehicle_spec,
             target=target,
             vehicle=vehicle,
             mapping=MappingSpec.from_dict(obj.get("mapping", {})),
+            expressive=dict(expressive),
             forbidden_implications=_as_str_list(obj.get("forbidden_implications", []), "forbidden_implications"),
             risk_domain=str(obj.get("risk_domain", "benign")),
             notes=str(obj.get("notes", "")),
@@ -172,9 +189,12 @@ class Case:
         return {
             "case_id": self.case_id,
             "stance_pattern": self.stance_pattern,
+            "metaphor_mode": self.metaphor_mode,
+            "vehicle_spec": self.vehicle_spec,
             "target": self.target.to_dict(),
             "vehicle": self.vehicle.to_dict(),
             "mapping": self.mapping.to_dict(),
+            "expressive": dict(self.expressive),
             "forbidden_implications": list(self.forbidden_implications),
             "risk_domain": self.risk_domain,
             "notes": self.notes,

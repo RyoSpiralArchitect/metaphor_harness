@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,7 @@ from .db import HarnessDB
 from .eval_rules import (
     apply_computed_pass_labels,
     bool_or_none,
+    compute_pass_metaphor_integrity,
     compute_pass_leakage,
     compute_pass_stance_pattern,
     compute_pass_relation,
@@ -32,6 +33,34 @@ BOOL_LABELS_RELATION_PRIMITIVE = [
     "surface_only_mapping",
     "domain_distance_respected",
 ]
+BOOL_LABELS_LITERARY = [
+    "over_explanation",
+    "register_mismatch",
+    "pass_literary_quality",
+]
+BOOL_LABELS_HUMOR = [
+    "incongruity_success",
+    "humor_flattening",
+    "over_explanation",
+    "pass_humor_quality",
+]
+BOOL_LABELS_META = [
+    "target_anchor_preserved",
+    "vehicle_affordance_coherent",
+    "literal_scene_confusion",
+    "semantic_break",
+    "mode_fit",
+    "target_fact_drift",
+    "vehicle_affordance_broken",
+    "medium_dynamics_mismatch",
+    "temporal_anchor_broken",
+    "premise_overload",
+    "tone_contract_slip",
+    "metaphor_literal_ambiguity",
+    "licensed_rupture_success",
+    "invariant_preserved",
+    "pass_metaphor_integrity",
+]
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -40,6 +69,21 @@ def _parse_json(text: str) -> dict[str, Any]:
         return obj if isinstance(obj, dict) else {"parse_error": True}
     except Exception:
         return {"parse_error": True}
+
+
+def _str_list(value: Any) -> list[str]:
+    def split_tags(text: str) -> list[str]:
+        normalized = text.replace("|", ",").replace(";", ",")
+        return [part.strip() for part in normalized.split(",") if part.strip()]
+
+    if isinstance(value, list):
+        tags: list[str] = []
+        for item in value:
+            tags.extend(split_tags(str(item)))
+        return tags
+    if isinstance(value, str):
+        return split_tags(value)
+    return []
 
 
 def _rate(rows: list[dict[str, Any]], key: str, positive: bool = True) -> float | None:
@@ -98,6 +142,9 @@ def build_run_level_rows(
         out = dict(gen)
         stance_audits = audits_by_run_type.get((run_id, "stance_leakage"), [])
         r_audits = audits_by_run_type.get((run_id, "relation"), [])
+        lit_audits = audits_by_run_type.get((run_id, "literary"), [])
+        humor_audits = audits_by_run_type.get((run_id, "humor"), [])
+        meta_audits = audits_by_run_type.get((run_id, "metaphor_integrity"), [])
 
         for label in BOOL_LABELS_STANCE_PRIMITIVE:
             out[label] = majority_bool(a["parsed"].get(label) for a in stance_audits)
@@ -124,6 +171,46 @@ def build_run_level_rows(
         out["relation_parse_error_rate"] = _rate([
             {"parse_error": bool(a["parsed"].get("parse_error"))} for a in r_audits
         ], "parse_error")
+
+        for label in BOOL_LABELS_LITERARY:
+            out[f"literary_{label}"] = majority_bool(a["parsed"].get(label) for a in lit_audits)
+        out["literary_freshness_score_mean"] = mean_number(a["parsed"].get("freshness_score") for a in lit_audits)
+        out["literary_tonal_fit_score_mean"] = mean_number(a["parsed"].get("tonal_fit_score") for a in lit_audits)
+        out["literary_affect_transfer_score_mean"] = mean_number(a["parsed"].get("affect_transfer_score") for a in lit_audits)
+        out["literary_poetic_compression_score_mean"] = mean_number(a["parsed"].get("poetic_compression_score") for a in lit_audits)
+        out["literary_cliche_risk_mean"] = mean_number(a["parsed"].get("cliche_risk") for a in lit_audits)
+        out["literary_parse_error_rate"] = _rate([
+            {"parse_error": bool(a["parsed"].get("parse_error"))} for a in lit_audits
+        ], "parse_error")
+
+        for label in BOOL_LABELS_HUMOR:
+            key = label if label.startswith("humor_") else f"humor_{label}"
+            out[key] = majority_bool(a["parsed"].get(label) for a in humor_audits)
+        out["humor_surprise_score_mean"] = mean_number(a["parsed"].get("surprise_score") for a in humor_audits)
+        out["humor_tonal_fit_score_mean"] = mean_number(a["parsed"].get("tonal_fit_score") for a in humor_audits)
+        out["humor_comic_timing_score_mean"] = mean_number(a["parsed"].get("comic_timing_score") for a in humor_audits)
+        out["humor_mean_spiritedness_risk_mean"] = mean_number(a["parsed"].get("mean_spiritedness_risk") for a in humor_audits)
+        out["humor_parse_error_rate"] = _rate([
+            {"parse_error": bool(a["parsed"].get("parse_error"))} for a in humor_audits
+        ], "parse_error")
+
+        for label in BOOL_LABELS_META:
+            key = label if label.startswith("metaphor_") else f"metaphor_{label}"
+            out[key] = majority_bool(a["parsed"].get(label) for a in meta_audits)
+        out["pass_metaphor_integrity"] = out["metaphor_pass_metaphor_integrity"]
+        out["premise_load_score_mean"] = mean_number(a["parsed"].get("premise_load_score") for a in meta_audits)
+        out["imageability_score_mean"] = mean_number(a["parsed"].get("imageability_score") for a in meta_audits)
+        if out["pass_metaphor_integrity"] is None:
+            out["pass_metaphor_integrity"] = compute_pass_metaphor_integrity(out)
+        out["metaphor_parse_error_rate"] = _rate([
+            {"parse_error": bool(a["parsed"].get("parse_error"))} for a in meta_audits
+        ], "parse_error")
+        failure_tags = sorted({
+            tag
+            for audit in meta_audits
+            for tag in _str_list(audit["parsed"].get("failure_tags"))
+        })
+        out["metaphor_failure_tags"] = ";".join(failure_tags)
         rows.append(out)
     return rows
 
@@ -196,6 +283,39 @@ def summarize(rows: list[dict[str, Any]], group_keys: list[str]) -> list[dict[st
             "surface_only_rate": _rate(items, "surface_only_mapping", True),
             "false_entailment_risk_mean": mean_number(r.get("false_entailment_risk_mean") for r in items),
             "relation_score_mean": mean_number(r.get("relation_score_mean") for r in items),
+            "literary_quality_pass_rate": _rate(items, "literary_pass_literary_quality", True),
+            "literary_over_explanation_rate": _rate(items, "literary_over_explanation", True),
+            "literary_register_mismatch_rate": _rate(items, "literary_register_mismatch", True),
+            "literary_freshness_score_mean": mean_number(r.get("literary_freshness_score_mean") for r in items),
+            "literary_tonal_fit_score_mean": mean_number(r.get("literary_tonal_fit_score_mean") for r in items),
+            "literary_affect_transfer_score_mean": mean_number(r.get("literary_affect_transfer_score_mean") for r in items),
+            "literary_poetic_compression_score_mean": mean_number(r.get("literary_poetic_compression_score_mean") for r in items),
+            "literary_cliche_risk_mean": mean_number(r.get("literary_cliche_risk_mean") for r in items),
+            "humor_quality_pass_rate": _rate(items, "humor_pass_humor_quality", True),
+            "humor_incongruity_success_rate": _rate(items, "humor_incongruity_success", True),
+            "humor_flattening_rate": _rate(items, "humor_flattening", True),
+            "humor_over_explanation_rate": _rate(items, "humor_over_explanation", True),
+            "humor_surprise_score_mean": mean_number(r.get("humor_surprise_score_mean") for r in items),
+            "humor_tonal_fit_score_mean": mean_number(r.get("humor_tonal_fit_score_mean") for r in items),
+            "humor_comic_timing_score_mean": mean_number(r.get("humor_comic_timing_score_mean") for r in items),
+            "humor_mean_spiritedness_risk_mean": mean_number(r.get("humor_mean_spiritedness_risk_mean") for r in items),
+            "metaphor_integrity_pass_rate": _rate(items, "pass_metaphor_integrity", True),
+            "target_anchor_loss_rate": _rate(items, "metaphor_target_anchor_preserved", False),
+            "vehicle_affordance_fail_rate": _rate(items, "metaphor_vehicle_affordance_coherent", False),
+            "literal_scene_confusion_rate": _rate(items, "metaphor_literal_scene_confusion", True),
+            "semantic_break_rate": _rate(items, "metaphor_semantic_break", True),
+            "mode_mismatch_rate": _rate(items, "metaphor_mode_fit", False),
+            "target_fact_drift_rate": _rate(items, "metaphor_target_fact_drift", True),
+            "vehicle_affordance_broken_rate": _rate(items, "metaphor_vehicle_affordance_broken", True),
+            "medium_dynamics_mismatch_rate": _rate(items, "metaphor_medium_dynamics_mismatch", True),
+            "temporal_anchor_broken_rate": _rate(items, "metaphor_temporal_anchor_broken", True),
+            "premise_overload_rate": _rate(items, "metaphor_premise_overload", True),
+            "tone_contract_slip_rate": _rate(items, "metaphor_tone_contract_slip", True),
+            "metaphor_literal_ambiguity_rate": _rate(items, "metaphor_literal_ambiguity", True),
+            "licensed_rupture_success_rate": _rate(items, "metaphor_licensed_rupture_success", True),
+            "invariant_loss_rate": _rate(items, "metaphor_invariant_preserved", False),
+            "premise_load_score_mean": mean_number(r.get("premise_load_score_mean") for r in items),
+            "imageability_score_mean": mean_number(r.get("imageability_score_mean") for r in items),
         })
         summary.append(s)
     return summary
@@ -206,7 +326,7 @@ def _index_summary(rows: list[dict[str, Any]], keys: list[str]) -> dict[tuple[An
 
 
 def build_mapping_visibility_delta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = ["stance_pattern", "domain_distance", "control_arm", "provider", "model"]
+    keys = ["metaphor_mode", "vehicle_spec", "stance_pattern", "domain_distance", "control_arm", "provider", "model"]
     summary = summarize([r for r in rows if r.get("mapping_visibility") in {"hidden", "scaffolded"}], keys + ["mapping_visibility"])
     idx = _index_summary(summary, keys + ["mapping_visibility"])
     base_keys = sorted({tuple(row.get(k) for k in keys) for row in summary}, key=lambda t: tuple(str(x) for x in t))
@@ -231,7 +351,7 @@ def build_mapping_visibility_delta(rows: list[dict[str, Any]]) -> list[dict[str,
 
 
 def build_control_delta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keys = ["stance_pattern", "domain_distance", "mapping_visibility", "provider", "model"]
+    keys = ["metaphor_mode", "vehicle_spec", "stance_pattern", "domain_distance", "mapping_visibility", "provider", "model"]
     summary = summarize([
         r for r in rows if r.get("control_arm") in {"metaphor_with_forbidden", "metaphor_without_forbidden"}
     ], keys + ["control_arm"])
@@ -257,6 +377,32 @@ def build_control_delta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def build_metaphor_failure_tag_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    group_keys = ["metaphor_mode", "vehicle_spec", "control_arm"]
+    group_totals: Counter[tuple[Any, ...]] = Counter(tuple(row.get(k) for k in group_keys) for row in rows)
+    tag_counts: Counter[tuple[Any, ...]] = Counter()
+    for row in rows:
+        key = tuple(row.get(k) for k in group_keys)
+        tags = [tag for tag in str(row.get("metaphor_failure_tags") or "").split(";") if tag]
+        for tag in tags:
+            tag_counts[key + (tag,)] += 1
+
+    out: list[dict[str, Any]] = []
+    for key, count in sorted(tag_counts.items(), key=lambda item: (-item[1], tuple(str(v) for v in item[0]))):
+        group = key[:-1]
+        tag = key[-1]
+        total = group_totals[group]
+        row = {k: v for k, v in zip(group_keys, group)}
+        row.update({
+            "failure_tag": tag,
+            "n_tagged": count,
+            "n_group": total,
+            "tag_rate": count / total if total else None,
+        })
+        out.append(row)
+    return out
+
+
 def build_judge_agreement(
     db: HarnessDB,
     judge_provider: str | None = None,
@@ -265,6 +411,15 @@ def build_judge_agreement(
     label_sets = {
         "stance_leakage": ["pass_leakage", "pass_stance_pattern", "stance_pattern_match", "literal_vehicle_asserted", "stance_slip"],
         "relation": ["pass_relation", "surface_only_mapping"],
+        "metaphor_integrity": [
+            "pass_metaphor_integrity", "target_anchor_preserved", "vehicle_affordance_coherent",
+            "literal_scene_confusion", "semantic_break", "mode_fit", "target_fact_drift",
+            "vehicle_affordance_broken", "medium_dynamics_mismatch", "temporal_anchor_broken",
+            "premise_overload", "tone_contract_slip", "metaphor_literal_ambiguity",
+            "licensed_rupture_success", "invariant_preserved",
+        ],
+        "literary": ["pass_literary_quality", "over_explanation", "register_mismatch"],
+        "humor": ["pass_humor_quality", "incongruity_success", "humor_flattening", "over_explanation"],
     }
     labels: dict[tuple[str, str, str], dict[str, bool]] = defaultdict(dict)
     for audit in _latest_audits(db, judge_provider=judge_provider, judge_model=judge_model):
@@ -333,6 +488,8 @@ def build_quality_scores(db: HarnessDB) -> list[dict[str, Any]]:
             "run_id": run_id,
             "case_id": gen.get("case_id"),
             "case_hash": gen.get("case_hash"),
+            "metaphor_mode": gen.get("metaphor_mode", "structural"),
+            "vehicle_spec": gen.get("vehicle_spec", "constrained"),
             "provider": gen.get("provider"),
             "model": gen.get("model"),
             "control_arm": gen.get("control_arm"),
@@ -400,30 +557,41 @@ def write_report(
     out.mkdir(parents=True, exist_ok=True)
 
     run_rows = build_run_level_rows(db, judge_provider=judge_provider, judge_model=judge_model)
-    metaphor_rows = [r for r in run_rows if r.get("control_arm") != "literal_paraphrase"]
-    literal_rows = [r for r in run_rows if r.get("control_arm") == "literal_paraphrase"]
+    structural_rows = [r for r in run_rows if r.get("metaphor_mode", "structural") == "structural"]
+    structural_metaphor_rows = [r for r in structural_rows if r.get("control_arm") != "literal_paraphrase"]
+    literal_rows = [r for r in structural_rows if r.get("control_arm") == "literal_paraphrase"]
+    expressive_rows = [r for r in run_rows if r.get("metaphor_mode", "structural") != "structural"]
 
-    by_stance = summarize(metaphor_rows, ["stance_pattern"])
-    by_stance_distance_visibility_arm = summarize(metaphor_rows, ["stance_pattern", "domain_distance", "mapping_visibility", "control_arm"])
-    by_provider = summarize(metaphor_rows, ["provider", "model"])
-    by_provider_temp = summarize(metaphor_rows, ["provider", "model", "temperature"])
-    by_far = summarize([r for r in metaphor_rows if r.get("domain_distance") == "far"], ["stance_pattern", "control_arm", "mapping_visibility", "provider"])
-    literal_summary = summarize(literal_rows, ["stance_pattern", "domain_distance", "provider", "model"])
-    mapping_delta = build_mapping_visibility_delta(metaphor_rows)
-    control_delta = build_control_delta(metaphor_rows)
+    by_mode_spec = summarize(run_rows, ["metaphor_mode", "vehicle_spec"])
+    by_stance = summarize(structural_metaphor_rows, ["vehicle_spec", "stance_pattern"])
+    by_stance_distance_visibility_arm = summarize(structural_metaphor_rows, ["vehicle_spec", "stance_pattern", "domain_distance", "mapping_visibility", "control_arm"])
+    by_provider = summarize(structural_metaphor_rows, ["vehicle_spec", "provider", "model"])
+    by_provider_temp = summarize(structural_metaphor_rows, ["vehicle_spec", "provider", "model", "temperature"])
+    by_far = summarize(
+        [r for r in structural_metaphor_rows if r.get("domain_distance") == "far"],
+        ["vehicle_spec", "stance_pattern", "control_arm", "mapping_visibility", "provider"],
+    )
+    literal_summary = summarize(literal_rows, ["vehicle_spec", "stance_pattern", "domain_distance", "provider", "model"])
+    expressive_summary = summarize(expressive_rows, ["metaphor_mode", "vehicle_spec", "provider", "model"])
+    metaphor_failure_tags = build_metaphor_failure_tag_summary(expressive_rows)
+    mapping_delta = build_mapping_visibility_delta(structural_metaphor_rows)
+    control_delta = build_control_delta(structural_metaphor_rows)
     agreement = build_judge_agreement(db, judge_provider=judge_provider, judge_model=judge_model)
     quality = build_quality_scores(db)
     eligible_quality = [r for r in quality if r.get("eligible_quality")]
-    human_agreement = build_human_agreement(db, human_labels_csv) if human_labels_csv else []
     audit_parse_summary = build_audit_parse_summary(db, judge_provider=judge_provider, judge_model=judge_model)
+    human_agreement = build_human_agreement(db, human_labels_csv) if human_labels_csv else []
 
     _write_csv(out / "run_level.csv", run_rows)
+    _write_csv(out / "summary_by_metaphor_mode_vehicle_spec.csv", by_mode_spec)
     _write_csv(out / "summary_by_stance_pattern.csv", by_stance)
     _write_csv(out / "summary_by_stance_distance_visibility_arm.csv", by_stance_distance_visibility_arm)
     _write_csv(out / "summary_by_provider.csv", by_provider)
     _write_csv(out / "summary_by_provider_temperature.csv", by_provider_temp)
     _write_csv(out / "summary_far_conditions.csv", by_far)
     _write_csv(out / "summary_literal_controls.csv", literal_summary)
+    _write_csv(out / "summary_expressive_modes.csv", expressive_summary)
+    _write_csv(out / "summary_metaphor_failure_tags.csv", metaphor_failure_tags)
     _write_csv(out / "summary_mapping_visibility_delta.csv", mapping_delta)
     _write_csv(out / "summary_control_delta.csv", control_delta)
     _write_csv(out / "judge_agreement.csv", agreement)
@@ -434,72 +602,97 @@ def write_report(
         _write_csv(out / "human_agreement.csv", human_agreement)
 
     md = []
-    md.append("# Metaphoric Stance & Relational Mapping Harness Report\n")
+    md.append("# Structural Analogy Stance Harness Report\n")
     md.append("## Overview\n")
     md.append(f"- generations: {len(run_rows)}\n")
-    md.append(f"- metaphor generations in main metrics: {len(metaphor_rows)}\n")
+    md.append(f"- structural metaphor generations in main metrics: {len(structural_metaphor_rows)}\n")
     md.append(f"- literal paraphrase controls, reported separately: {len(literal_rows)}\n")
+    md.append(f"- expressive-mode generations held outside structural relation metrics: {len(expressive_rows)}\n")
     md.append(f"- quality pair comparisons: {len(db.fetch_quality_pairs())}\n")
-    if judge_provider or judge_model:
-        md.append(f"- judge filter: provider={judge_provider or '*'}, model={judge_model or '*'}\n")
-    for row in audit_parse_summary:
-        md.append(f"- {row['audit_type']} parse errors: {row['parse_errors']} / {row['n']} ({_fmt_pct(row['parse_error_rate'])})\n")
-    md.append("\nMain metaphor summaries exclude `literal_paraphrase`; literal controls are isolated below so vehicle/target stance metrics are not polluted by no-vehicle outputs.\n")
+    md.append("\nMain structural summaries include only `metaphor_mode=structural` and exclude `literal_paraphrase`. Literary/humorous rows are held outside structural relation metrics until dedicated human-heavy judges are used.\n")
 
-    md.append("\n## Main metaphor summary by stance pattern\n")
+    md.append("\n## Boundary summary by metaphor mode × vehicle spec\n")
+    md.append(_markdown_table(by_mode_spec, [
+        "metaphor_mode", "vehicle_spec", "n", "pass_leakage_rate", "relation_pass_rate",
+        "metaphor_integrity_pass_rate", "literary_quality_pass_rate", "humor_quality_pass_rate",
+        "false_entailment_risk_mean", "relation_score_mean",
+    ]))
+
+    md.append("\n## Main structural summary by vehicle spec × stance pattern\n")
     md.append(_markdown_table(by_stance, [
-        "stance_pattern", "n", "stance_pattern_match_rate", "stance_slip_rate",
+        "vehicle_spec", "stance_pattern", "n", "stance_pattern_match_rate", "stance_slip_rate",
         "vehicle_leakage_rate", "target_drift_rate", "pass_leakage_rate",
         "relation_pass_rate", "false_entailment_risk_mean", "relation_score_mean",
     ]))
-    md.append("\n## Main metaphor summary by stance pattern × distance × mapping visibility × control arm\n")
+    md.append("\n## Main structural summary by vehicle spec × stance pattern × distance × mapping visibility × control arm\n")
     md.append(_markdown_table(by_stance_distance_visibility_arm, [
-        "stance_pattern", "domain_distance", "mapping_visibility", "control_arm", "n",
+        "vehicle_spec", "stance_pattern", "domain_distance", "mapping_visibility", "control_arm", "n",
         "stance_pattern_match_rate", "stance_slip_rate", "vehicle_leakage_rate",
         "pass_leakage_rate", "relation_pass_rate", "surface_only_rate",
     ], max_rows=100))
     md.append("\n## Mapping visibility delta: scaffolded minus hidden\n")
     md.append(_markdown_table(mapping_delta, [
-        "stance_pattern", "domain_distance", "control_arm", "provider", "model", "n_hidden", "n_scaffolded",
+        "vehicle_spec", "stance_pattern", "domain_distance", "control_arm", "provider", "model", "n_hidden", "n_scaffolded",
         "delta_relation_pass_rate_scaffolded_minus_hidden", "delta_surface_only_rate_scaffolded_minus_hidden",
         "delta_pass_leakage_rate_scaffolded_minus_hidden", "delta_stance_slip_rate_scaffolded_minus_hidden",
     ], max_rows=80))
     md.append("\n## Forbidden-list control delta: without minus with\n")
     md.append(_markdown_table(control_delta, [
-        "stance_pattern", "domain_distance", "mapping_visibility", "provider", "model", "n_with_forbidden", "n_without_forbidden",
+        "vehicle_spec", "stance_pattern", "domain_distance", "mapping_visibility", "provider", "model", "n_with_forbidden", "n_without_forbidden",
         "delta_pass_leakage_rate_without_minus_with", "delta_vehicle_leakage_rate_without_minus_with",
         "delta_target_drift_rate_without_minus_with", "delta_stance_slip_rate_without_minus_with",
     ], max_rows=80))
     md.append("\n## Literal paraphrase controls\n")
     md.append(_markdown_table(literal_summary, [
-        "stance_pattern", "domain_distance", "provider", "model", "n",
+        "vehicle_spec", "stance_pattern", "domain_distance", "provider", "model", "n",
         "target_drift_rate", "unsupported_claim_rate", "pass_leakage_rate", "false_entailment_risk_mean",
     ], max_rows=40))
-    md.append("\n## Summary by provider, metaphor arms only\n")
+    md.append("\n## Expressive modes held outside structural relation metrics\n")
+    md.append(_markdown_table(expressive_summary, [
+        "metaphor_mode", "vehicle_spec", "provider", "model", "n",
+        "pass_leakage_rate", "metaphor_integrity_pass_rate", "premise_load_score_mean",
+        "imageability_score_mean", "vehicle_affordance_broken_rate", "medium_dynamics_mismatch_rate",
+        "temporal_anchor_broken_rate", "premise_overload_rate", "tone_contract_slip_rate",
+        "metaphor_literal_ambiguity_rate", "licensed_rupture_success_rate", "invariant_loss_rate",
+        "vehicle_affordance_fail_rate", "semantic_break_rate", "literal_scene_confusion_rate", "mode_mismatch_rate",
+        "literary_quality_pass_rate", "literary_freshness_score_mean",
+        "literary_affect_transfer_score_mean", "literary_cliche_risk_mean",
+        "humor_quality_pass_rate", "humor_incongruity_success_rate", "humor_surprise_score_mean",
+        "humor_flattening_rate", "false_entailment_risk_mean",
+    ], max_rows=40))
+    md.append("\n## Metaphor-integrity failure tags, expressive modes\n")
+    md.append(_markdown_table(metaphor_failure_tags, [
+        "metaphor_mode", "vehicle_spec", "control_arm", "failure_tag", "n_tagged", "n_group", "tag_rate",
+    ], max_rows=80))
+    md.append("\n## Summary by provider, structural metaphor arms only\n")
     md.append(_markdown_table(by_provider, [
-        "provider", "model", "n", "stance_pattern_match_rate", "stance_slip_rate",
+        "vehicle_spec", "provider", "model", "n", "stance_pattern_match_rate", "stance_slip_rate",
         "vehicle_leakage_rate", "pass_leakage_rate", "relation_pass_rate",
     ]))
-    md.append("\n## Far-domain conditions, metaphor arms only\n")
+    md.append("\n## Far-domain conditions, structural metaphor arms only\n")
     md.append(_markdown_table(by_far, [
-        "stance_pattern", "control_arm", "mapping_visibility", "provider", "n", "stance_pattern_match_rate",
+        "vehicle_spec", "stance_pattern", "control_arm", "mapping_visibility", "provider", "n", "stance_pattern_match_rate",
         "stance_slip_rate", "relation_pass_rate", "surface_only_rate",
     ], max_rows=80))
     md.append("\n## Judge agreement: pairwise Cohen's κ\n")
     md.append(_markdown_table(agreement, [
         "audit_type", "label", "judge_a", "judge_b", "n_common", "cohens_kappa",
     ], max_rows=80))
+    md.append("\n## Audit parse summary\n")
+    md.append(_markdown_table(audit_parse_summary, [
+        "audit_type", "n", "parse_errors", "parse_error_rate",
+    ], max_rows=20))
     if human_labels_csv:
         md.append("\n## Human gold agreement\n")
         md.append(_markdown_table(human_agreement, ["label", "n_common", "agreement_rate", "cohens_kappa"], max_rows=20))
 
     md.append("\n## Top raw quality pairwise scores\n")
     md.append(_markdown_table(quality[:20], [
-        "case_id", "provider", "model", "control_arm", "mapping_visibility", "temperature", "comparisons", "quality_win_rate", "eligible_quality", "generated_text",
+        "case_id", "metaphor_mode", "vehicle_spec", "provider", "model", "control_arm", "mapping_visibility", "temperature", "comparisons", "quality_win_rate", "eligible_quality", "generated_text",
     ], max_rows=20))
     md.append("\n## Top eligible quality pairwise scores\n")
     md.append(_markdown_table(eligible_quality[:20], [
-        "case_id", "provider", "model", "control_arm", "mapping_visibility", "temperature", "comparisons", "quality_win_rate", "generated_text",
+        "case_id", "metaphor_mode", "vehicle_spec", "provider", "model", "control_arm", "mapping_visibility", "temperature", "comparisons", "quality_win_rate", "generated_text",
     ], max_rows=20))
 
     (out / "report.md").write_text("\n".join(md), encoding="utf-8")
@@ -518,7 +711,14 @@ def export_human_gold(db_path: str, out_csv: str, n: int = 50, seed: str = "huma
     db.close()
     groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[(row.get("stance_pattern"), row.get("domain_distance"), row.get("mapping_visibility"), row.get("control_arm"))].append(row)
+        groups[(
+            row.get("metaphor_mode", "structural"),
+            row.get("vehicle_spec", "constrained"),
+            row.get("stance_pattern"),
+            row.get("domain_distance"),
+            row.get("mapping_visibility"),
+            row.get("control_arm"),
+        )].append(row)
     rng = random.Random(seed)
     selected: list[dict[str, Any]] = []
     group_keys = list(groups.keys())
@@ -536,9 +736,11 @@ def export_human_gold(db_path: str, out_csv: str, n: int = 50, seed: str = "huma
     out = Path(out_csv)
     out.parent.mkdir(parents=True, exist_ok=True)
     fields = [
-        "run_id", "case_id", "case_hash", "stance_pattern", "domain_distance", "mapping_visibility", "control_arm",
+        "run_id", "case_id", "case_hash", "metaphor_mode", "vehicle_spec", "stance_pattern", "domain_distance", "mapping_visibility", "control_arm",
         "provider", "model", "temperature", "sample_index", "generated_text",
         "human_stance_pattern_match", "human_stance_slip", "human_pass_leakage", "human_pass_relation",
+        "human_pass_metaphor_integrity",
+        "human_pass_literary_quality", "human_pass_humor_quality",
         "human_notes",
     ]
     with out.open("w", encoding="utf-8", newline="") as f:
@@ -555,6 +757,9 @@ def build_human_agreement(db: HarnessDB, human_csv_path: str) -> list[dict[str, 
         "stance_slip": "human_stance_slip",
         "pass_leakage": "human_pass_leakage",
         "pass_relation": "human_pass_relation",
+        "pass_metaphor_integrity": "human_pass_metaphor_integrity",
+        "literary_pass_literary_quality": "human_pass_literary_quality",
+        "humor_pass_humor_quality": "human_pass_humor_quality",
     }
     human: dict[str, dict[str, bool]] = {label: {} for label in comparisons}
     llm: dict[str, dict[str, bool]] = {label: {} for label in comparisons}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-PASS_RULES_VERSION = "rules"
+PASS_RULES_VERSION = "rules_v2"
 
 
 def bool_or_none(x: Any) -> bool | None:
@@ -108,6 +108,97 @@ def compute_pass_relation(labels: dict[str, Any]) -> bool | None:
     return None
 
 
+def compute_pass_metaphor_integrity(labels: dict[str, Any]) -> bool | None:
+    def get(name: str) -> Any:
+        return labels.get(name, labels.get(f"metaphor_{name}"))
+
+    target_anchor = bool_or_none(get("target_anchor_preserved"))
+    vehicle_affordance = bool_or_none(get("vehicle_affordance_coherent"))
+    literal_scene = bool_or_none(get("literal_scene_confusion"))
+    semantic_break = bool_or_none(get("semantic_break"))
+    mode_fit = bool_or_none(get("mode_fit"))
+    target_fact_drift = bool_or_none(get("target_fact_drift"))
+    vehicle_affordance_broken = bool_or_none(get("vehicle_affordance_broken"))
+    medium_dynamics_mismatch = bool_or_none(get("medium_dynamics_mismatch"))
+    temporal_anchor_broken = bool_or_none(get("temporal_anchor_broken"))
+    premise_overload = bool_or_none(get("premise_overload"))
+    tone_contract_slip = bool_or_none(get("tone_contract_slip"))
+    metaphor_literal_ambiguity = bool_or_none(get("metaphor_literal_ambiguity"))
+    licensed_rupture = bool_or_none(get("licensed_rupture_success"))
+    invariant_preserved = bool_or_none(get("invariant_preserved"))
+    premise_load = number_or_none(labels.get("premise_load_score"))
+    if premise_load is None:
+        premise_load = number_or_none(labels.get("premise_load_score_mean"))
+    imageability = number_or_none(labels.get("imageability_score"))
+    if imageability is None:
+        imageability = number_or_none(labels.get("imageability_score_mean"))
+
+    rupture_is_licensed = licensed_rupture is True
+
+    if target_fact_drift is True:
+        return False
+    if invariant_preserved is False:
+        return False
+    if target_anchor is False:
+        return False
+    if vehicle_affordance is False and not rupture_is_licensed:
+        return False
+    if vehicle_affordance_broken is True and not rupture_is_licensed:
+        return False
+    if medium_dynamics_mismatch is True and not rupture_is_licensed:
+        return False
+    if temporal_anchor_broken is True and not rupture_is_licensed:
+        return False
+    if premise_overload is True and not rupture_is_licensed:
+        return False
+    if literal_scene is True and not rupture_is_licensed:
+        return False
+    if semantic_break is True and not rupture_is_licensed:
+        return False
+    if mode_fit is False or tone_contract_slip is True:
+        return False
+    if metaphor_literal_ambiguity is True:
+        return False
+    if premise_load is not None and premise_load >= 4 and not rupture_is_licensed:
+        return False
+    if imageability is not None and imageability <= 2:
+        return False
+
+    if (
+        target_anchor is True
+        and vehicle_affordance is True
+        and literal_scene is False
+        and semantic_break is False
+        and mode_fit is True
+        and premise_load is not None
+        and premise_load <= 3
+        and imageability is not None
+        and imageability >= 3
+        and target_fact_drift is not True
+        and vehicle_affordance_broken is not True
+        and medium_dynamics_mismatch is not True
+        and temporal_anchor_broken is not True
+        and premise_overload is not True
+        and tone_contract_slip is not True
+        and metaphor_literal_ambiguity is not True
+        and invariant_preserved is not False
+    ):
+        return True
+    if (
+        rupture_is_licensed
+        and target_fact_drift is not True
+        and invariant_preserved is not False
+        and target_anchor is not False
+        and mode_fit is not False
+        and tone_contract_slip is not True
+        and metaphor_literal_ambiguity is not True
+        and imageability is not None
+        and imageability >= 3
+    ):
+        return True
+    return None
+
+
 def apply_computed_pass_labels(parsed: dict[str, Any], audit_type: str) -> dict[str, Any]:
     """Return a copy with deterministic pass_* labels overriding judge-supplied pass fields.
 
@@ -128,4 +219,8 @@ def apply_computed_pass_labels(parsed: dict[str, Any], audit_type: str) -> dict[
         if "pass_relation" in out:
             out["judge_pass_relation_raw"] = out.get("pass_relation")
         out["pass_relation"] = compute_pass_relation(out)
+    elif audit_type == "metaphor_integrity":
+        if "pass_metaphor_integrity" in out:
+            out["judge_pass_metaphor_integrity_raw"] = out.get("pass_metaphor_integrity")
+        out["pass_metaphor_integrity"] = compute_pass_metaphor_integrity(out)
     return out

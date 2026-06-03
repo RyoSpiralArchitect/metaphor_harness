@@ -14,10 +14,16 @@ from .eval_rules import apply_computed_pass_labels
 from .io_utils import load_cases_jsonl
 from .prompts import (
     GEN_PROMPT_VERSION,
+    J_HUMOR_PROMPT_VERSION,
+    J_META_PROMPT_VERSION,
     J1_PROMPT_VERSION,
     J2_PROMPT_VERSION,
+    J_LIT_PROMPT_VERSION,
     J3_PROMPT_VERSION,
     make_generation_messages,
+    make_humor_audit_messages,
+    make_literary_audit_messages,
+    make_metaphor_integrity_audit_messages,
     make_stance_leakage_audit_messages,
     make_quality_pairwise_messages,
     make_relation_audit_messages,
@@ -155,6 +161,18 @@ class HarnessRunner:
             prefix="gen_",
         )
 
+    def _audit_specs_for_case(self, case: Case) -> list[tuple[str, str]]:
+        specs = [("stance_leakage", J1_PROMPT_VERSION)]
+        if case.metaphor_mode == "structural":
+            specs.append(("relation", J2_PROMPT_VERSION))
+        elif case.metaphor_mode == "literary":
+            specs.append(("metaphor_integrity", J_META_PROMPT_VERSION))
+            specs.append(("literary", J_LIT_PROMPT_VERSION))
+        elif case.metaphor_mode == "humorous":
+            specs.append(("metaphor_integrity", J_META_PROMPT_VERSION))
+            specs.append(("humor", J_HUMOR_PROMPT_VERSION))
+        return specs
+
     async def run(self) -> None:
         cases = load_cases_jsonl(self.options.cases_path)
         for arm in self.options.control_arms:
@@ -187,14 +205,33 @@ class HarnessRunner:
 
         if self.options.dry_run:
             planned_generations = len(generation_jobs)
-            existing_generations = len(self.db.fetch_generations())
-            planned_audits = (planned_generations + existing_generations) * len(self.judges) * 2
+            case_lookup = {ch: Case.from_dict(obj) for ch, obj in self.db.fetch_cases_by_hash().items()}
+            planned_audits = 0
+            planned_new_audits = 0
+            for _run_id, _ch, case, *_rest in generation_jobs:
+                audit_count = len(self._audit_specs_for_case(case)) * len(self.judges)
+                planned_audits += audit_count
+                planned_new_audits += audit_count
+            for gen in self.db.fetch_generations():
+                case = case_lookup.get(gen["case_hash"])
+                if case is not None:
+                    for judge_index, judge in enumerate(self.judges):
+                        for audit_type, prompt_version in self._audit_specs_for_case(case):
+                            planned_audits += 1
+                            audit_id = stable_id(
+                                "audit", prompt_version, gen["run_id"], audit_type,
+                                judge.name, judge.model, judge_index,
+                                prefix="aud_",
+                            )
+                            if not self.db.audit_exists(audit_id):
+                                planned_new_audits += 1
             print(json.dumps({
                 "mode": "dry_run",
                 "cases_loaded": len(cases),
                 "cases_skipped_due_to_risk_guard": skipped_cases,
                 "planned_new_generations": planned_generations,
-                "approx_audit_calls_after_generation": planned_audits,
+                "planned_total_audit_calls_after_generation": planned_audits,
+                "planned_new_audit_calls": planned_new_audits,
                 "generators": [g.name for g in self.generators],
                 "judges": [j.name for j in self.judges],
                 "temperatures": self.options.temperatures,
@@ -205,8 +242,12 @@ class HarnessRunner:
                     "generation": GEN_PROMPT_VERSION,
                     "j1": J1_PROMPT_VERSION,
                     "j2": J2_PROMPT_VERSION,
+                    "j_meta": J_META_PROMPT_VERSION,
+                    "j_lit": J_LIT_PROMPT_VERSION,
+                    "j_humor": J_HUMOR_PROMPT_VERSION,
                     "j3": J3_PROMPT_VERSION,
                 },
+                "mode_boundary": "relation audits run only for structural; literary and humorous use metaphor-integrity plus dedicated expressive audits",
             }, ensure_ascii=False, indent=2))
             return
 
@@ -243,6 +284,8 @@ class HarnessRunner:
                 "case_id": case.case_id,
                 "case_hash": ch,
                 "stance_pattern": case.stance_pattern,
+                "metaphor_mode": case.metaphor_mode,
+                "vehicle_spec": case.vehicle_spec,
                 "domain_distance": case.mapping.domain_distance,
                 "mapping_visibility": mapping_visibility,
                 "control_arm": arm,
@@ -267,8 +310,7 @@ class HarnessRunner:
                 by_id = self.db.fetch_cases()
                 case = Case.from_dict(by_id[gen["case_id"]])
             for judge_index, judge in enumerate(self.judges):
-                audit_specs = [("stance_leakage", J1_PROMPT_VERSION), ("relation", J2_PROMPT_VERSION)]
-                for audit_type, prompt_version in audit_specs:
+                for audit_type, prompt_version in self._audit_specs_for_case(case):
                     audit_id = stable_id(
                         "audit", prompt_version, gen["run_id"], audit_type,
                         judge.name, judge.model, judge_index,
@@ -298,6 +340,12 @@ class HarnessRunner:
                 messages = make_stance_leakage_audit_messages(case, gen["control_arm"], mapping_visibility, gen["generated_text"])
             elif audit_type == "relation":
                 messages = make_relation_audit_messages(case, gen["control_arm"], mapping_visibility, gen["generated_text"])
+            elif audit_type == "literary":
+                messages = make_literary_audit_messages(case, gen["control_arm"], mapping_visibility, gen["generated_text"])
+            elif audit_type == "humor":
+                messages = make_humor_audit_messages(case, gen["control_arm"], mapping_visibility, gen["generated_text"])
+            elif audit_type == "metaphor_integrity":
+                messages = make_metaphor_integrity_audit_messages(case, gen["control_arm"], mapping_visibility, gen["generated_text"])
             else:
                 raise ValueError(f"unknown audit_type: {audit_type}")
             messages[-1]["content"] += f"\n\nAUDIT_ID: {audit_id}\nPROMPT_VERSION: {prompt_version}"
@@ -324,11 +372,20 @@ class HarnessRunner:
         for gen in gens:
             if gen["control_arm"] == "literal_paraphrase":
                 continue
-            groups.setdefault((gen["case_hash"], gen["control_arm"], gen["mapping_visibility"]), []).append(gen)
+            groups.setdefault(
+                (
+                    gen["case_hash"],
+                    gen["metaphor_mode"],
+                    gen["vehicle_spec"],
+                    gen["control_arm"],
+                    gen["mapping_visibility"],
+                ),
+                [],
+            ).append(gen)
 
         jobs = []
         rng = random.Random("quality-pairs")
-        for (ch, control_arm, mapping_visibility), rows in groups.items():
+        for (ch, metaphor_mode, vehicle_spec, control_arm, mapping_visibility), rows in groups.items():
             if len(rows) < 2:
                 continue
             pairs = list(itertools.combinations(rows, 2))
@@ -345,7 +402,7 @@ class HarnessRunner:
                         prefix="qual_",
                     )
                     if not self.db.quality_pair_exists(pair_id):
-                        jobs.append((pair_id, case, ch, control_arm, mapping_visibility, a, b, judge, judge_index))
+                        jobs.append((pair_id, case, ch, metaphor_mode, vehicle_spec, control_arm, mapping_visibility, a, b, judge, judge_index))
         if jobs:
             print(f"quality pair jobs: {len(jobs)}")
             await asyncio.gather(*(self._run_quality_pair_job(*job) for job in jobs))
@@ -357,6 +414,8 @@ class HarnessRunner:
         pair_id: str,
         case: Case,
         ch: str,
+        metaphor_mode: str,
+        vehicle_spec: str,
         control_arm: str,
         mapping_visibility: str,
         a: Any,
@@ -372,6 +431,8 @@ class HarnessRunner:
                 "pair_id": pair_id,
                 "case_id": case.case_id,
                 "case_hash": ch,
+                "metaphor_mode": metaphor_mode,
+                "vehicle_spec": vehicle_spec,
                 "mapping_visibility": mapping_visibility,
                 "control_arm": control_arm,
                 "text_a_run_id": a["run_id"],
