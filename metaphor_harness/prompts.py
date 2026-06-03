@@ -298,7 +298,7 @@ def make_metaphor_integrity_audit_messages(case: Case, control_arm: str, mapping
         "metaphor_literal_ambiguity": False,
         "licensed_rupture_success": False,
         "invariant_preserved": True,
-        "failure_tags": ["vehicle_affordance_broken | medium_dynamics_mismatch | temporal_anchor_broken | premise_overload | target_fact_drift | tone_contract_slip | metaphor_literal_ambiguity | over_grandiose | cliche_or_default_image | over_explained | imageability_failure"],
+        "failure_tags": ["vehicle_affordance_broken", "medium_dynamics_mismatch"],
         "pass_metaphor_integrity": True,
         "reason": "short explanation",
     }

@@ -97,6 +97,10 @@ class HarnessTests(unittest.TestCase):
                 self.assertTrue(any(r["pass_metaphor_integrity"] is not None for r in rows))
                 self.assertTrue(all("metaphor_vehicle_affordance_broken" in r for r in rows))
                 self.assertTrue(all("metaphor_licensed_rupture_success" in r for r in rows))
+                self.assertTrue(all("metaphor_literal_ambiguity" in r for r in rows))
+                self.assertTrue(all("humor_flattening" in r for r in rows))
+                self.assertTrue(all("metaphor_metaphor_literal_ambiguity" not in r for r in rows))
+                self.assertTrue(all("humor_humor_flattening" not in r for r in rows))
             finally:
                 db.close()
 

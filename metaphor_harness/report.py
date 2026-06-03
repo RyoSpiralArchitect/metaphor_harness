@@ -72,10 +72,17 @@ def _parse_json(text: str) -> dict[str, Any]:
 
 
 def _str_list(value: Any) -> list[str]:
+    def split_tags(text: str) -> list[str]:
+        normalized = text.replace("|", ",").replace(";", ",")
+        return [part.strip() for part in normalized.split(",") if part.strip()]
+
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        tags: list[str] = []
+        for item in value:
+            tags.extend(split_tags(str(item)))
+        return tags
     if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
+        return split_tags(value)
     return []
 
 
@@ -177,7 +184,8 @@ def build_run_level_rows(
         ], "parse_error")
 
         for label in BOOL_LABELS_HUMOR:
-            out[f"humor_{label}"] = majority_bool(a["parsed"].get(label) for a in humor_audits)
+            key = label if label.startswith("humor_") else f"humor_{label}"
+            out[key] = majority_bool(a["parsed"].get(label) for a in humor_audits)
         out["humor_surprise_score_mean"] = mean_number(a["parsed"].get("surprise_score") for a in humor_audits)
         out["humor_tonal_fit_score_mean"] = mean_number(a["parsed"].get("tonal_fit_score") for a in humor_audits)
         out["humor_comic_timing_score_mean"] = mean_number(a["parsed"].get("comic_timing_score") for a in humor_audits)
@@ -187,7 +195,8 @@ def build_run_level_rows(
         ], "parse_error")
 
         for label in BOOL_LABELS_META:
-            out[f"metaphor_{label}"] = majority_bool(a["parsed"].get(label) for a in meta_audits)
+            key = label if label.startswith("metaphor_") else f"metaphor_{label}"
+            out[key] = majority_bool(a["parsed"].get(label) for a in meta_audits)
         out["pass_metaphor_integrity"] = out["metaphor_pass_metaphor_integrity"]
         out["premise_load_score_mean"] = mean_number(a["parsed"].get("premise_load_score") for a in meta_audits)
         out["imageability_score_mean"] = mean_number(a["parsed"].get("imageability_score") for a in meta_audits)
@@ -284,7 +293,7 @@ def summarize(rows: list[dict[str, Any]], group_keys: list[str]) -> list[dict[st
             "literary_cliche_risk_mean": mean_number(r.get("literary_cliche_risk_mean") for r in items),
             "humor_quality_pass_rate": _rate(items, "humor_pass_humor_quality", True),
             "humor_incongruity_success_rate": _rate(items, "humor_incongruity_success", True),
-            "humor_flattening_rate": _rate(items, "humor_humor_flattening", True),
+            "humor_flattening_rate": _rate(items, "humor_flattening", True),
             "humor_over_explanation_rate": _rate(items, "humor_over_explanation", True),
             "humor_surprise_score_mean": mean_number(r.get("humor_surprise_score_mean") for r in items),
             "humor_tonal_fit_score_mean": mean_number(r.get("humor_tonal_fit_score_mean") for r in items),
@@ -302,7 +311,7 @@ def summarize(rows: list[dict[str, Any]], group_keys: list[str]) -> list[dict[st
             "temporal_anchor_broken_rate": _rate(items, "metaphor_temporal_anchor_broken", True),
             "premise_overload_rate": _rate(items, "metaphor_premise_overload", True),
             "tone_contract_slip_rate": _rate(items, "metaphor_tone_contract_slip", True),
-            "metaphor_literal_ambiguity_rate": _rate(items, "metaphor_metaphor_literal_ambiguity", True),
+            "metaphor_literal_ambiguity_rate": _rate(items, "metaphor_literal_ambiguity", True),
             "licensed_rupture_success_rate": _rate(items, "metaphor_licensed_rupture_success", True),
             "invariant_loss_rate": _rate(items, "metaphor_invariant_preserved", False),
             "premise_load_score_mean": mean_number(r.get("premise_load_score_mean") for r in items),
